@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kaiserclaim-worker
+  namespace: kaiserclaim
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kaiserclaim-worker
+  template:
+    metadata:
+      labels:
+        app: kaiserclaim-worker
+    spec:
+      containers:
+        - name: worker
+          image: ghcr.io/YOUR_ORG/kaiserclaim:latest
+          imagePullPolicy: Always
+          command:
+            - celery
+            - -A
+            - workers.tasks.celery_app
+            - worker
+            - --loglevel=info
+            - --concurrency=2
+          envFrom:
+            - secretRef:
+                name: kaiserclaim-secrets
+          volumeMounts:
+            - name: storage
+              mountPath: /mnt/nas
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi     # OCR + Playwright are memory-hungry
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: kaiserclaim-storage

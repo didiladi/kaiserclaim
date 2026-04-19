@@ -1,0 +1,14 @@
+# NAS storage for invoice files and the ÖGK persistent browser session.
+# Adjust storageClassName to match your k3s NFS/SMB provisioner.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kaiserclaim-storage
+  namespace: kaiserclaim
+spec:
+  accessModes:
+    - ReadWriteMany   # shared between api + worker pods
+  storageClassName: nfs-client   # change to your provisioner class
+  resources:
+    requests:
+      storage: 50Gi

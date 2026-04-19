@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaiserclaim-migrate
+  namespace: kaiserclaim
+  annotations:
+    # Helm-style hook annotation if you later wrap this in Helm.
+    # Without Helm, run this job manually before deploying / on each image update.
+    description: "Runs alembic upgrade head before the app starts"
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: ghcr.io/YOUR_ORG/kaiserclaim:latest
+          imagePullPolicy: Always
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - secretRef:
+                name: kaiserclaim-secrets
+          volumeMounts:
+            - name: storage
+              mountPath: /mnt/nas
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: kaiserclaim-storage

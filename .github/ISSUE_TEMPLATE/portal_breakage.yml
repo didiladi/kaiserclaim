@@ -1,0 +1,40 @@
+name: Portal breakage
+description: A Merkur or ÖGK Playwright bot stopped working after a portal update
+labels: [portal-breakage, bug]
+body:
+  - type: dropdown
+    id: portal
+    attributes:
+      label: Which portal?
+      options:
+        - Merkur
+        - ÖGK
+    validations:
+      required: true
+
+  - type: dropdown
+    id: step
+    attributes:
+      label: Which step failed?
+      options:
+        - Login
+        - File upload
+        - Form fill / submission
+        - Download (refund PDF)
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: symptom
+    attributes:
+      label: Symptom
+      description: Error message, timeout, or unexpected behaviour. No personal data or screenshots needed.
+    validations:
+      required: true
+
+  - type: input
+    id: date
+    attributes:
+      label: When did it start failing? (approximate date)
+      description: Helps narrow down which portal release broke things.

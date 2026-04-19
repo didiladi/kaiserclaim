@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kaiserclaim-api
+  namespace: kaiserclaim
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kaiserclaim-api
+  template:
+    metadata:
+      labels:
+        app: kaiserclaim-api
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/YOUR_ORG/kaiserclaim:latest
+          imagePullPolicy: Always
+          command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: kaiserclaim-secrets
+          volumeMounts:
+            - name: storage
+              mountPath: /mnt/nas
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: kaiserclaim-storage
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kaiserclaim-api-svc
+  namespace: kaiserclaim
+spec:
+  selector:
+    app: kaiserclaim-api
+  ports:
+    - port: 80
+      targetPort: 8000

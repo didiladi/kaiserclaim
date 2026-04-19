@@ -1,0 +1,91 @@
+version: "3.9"
+
+x-app-env: &app-env
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql+asyncpg://kaiserclaim:secret@postgres:5432/kaiserclaim
+    REDIS_URL: redis://redis:6379/0
+    CELERY_BROKER_URL: redis://redis:6379/0
+    CELERY_RESULT_BACKEND: redis://redis:6379/1
+    STORAGE_ROOT: /mnt/storage
+
+x-app-volumes: &app-volumes
+  - storage:/mnt/storage
+  # Mount the OGK persistent browser session so it survives container restarts
+  - oegk_session:/mnt/storage/.oegk_browser_session
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kaiserclaim
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: kaiserclaim
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kaiserclaim"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  migrate:
+    build:
+      context: .
+      target: base
+    command: alembic upgrade head
+    <<: *app-env
+    volumes: *app-volumes
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      target: api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    <<: *app-env
+    volumes: *app-volumes
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    <<: *app-env
+    volumes: *app-volumes
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    # Workers that drive the OGK bot need a display (or Xvfb) when running
+    # non-headless. For the pharmacy MVP (Merkur only, headless) this is fine as-is.
+    environment:
+      DISPLAY: ""
+
+volumes:
+  postgres_data:
+  redis_data:
+  storage:
+  oegk_session:

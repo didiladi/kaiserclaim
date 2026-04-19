@@ -1,0 +1,16 @@
+# Traefik IngressRoute (k3s default ingress controller).
+# Exposes the API on kaiserclaim.local — add this to your LAN DNS / /etc/hosts.
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: kaiserclaim-ingress
+  namespace: kaiserclaim
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`kaiserclaim.local`)
+      kind: Rule
+      services:
+        - name: kaiserclaim-api-svc
+          port: 80
