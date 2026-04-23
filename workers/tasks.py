@@ -16,6 +16,7 @@ from core.database import AsyncSessionLocal
 from models.domain import Invoice, InvoiceStatus
 from services.ocr_engine import pdf_to_text
 from services.regex_parser import parse_pharmacy_receipt
+from services.rksv_parser import extract_rksv_from_image
 from workers.playwright_bot import MerkurBot, OegkBot
 
 settings = get_settings()
@@ -69,15 +70,28 @@ def run_ocr(self, invoice_id: str) -> dict:
         if not invoice:
             raise ValueError(f"Invoice {invoice_id} not found")
 
-        text = _run(pdf_to_text(invoice.file_path))
-        parsed = parse_pharmacy_receipt(text)
+        # Try fast RKSV QR extraction first (images only)
+        from services.rksv_parser import extract_qr_codes
+        qr_raw = extract_qr_codes(invoice.file_path)
+        print(f"QR codes found: {qr_raw}", flush=True)
+        rksv = extract_rksv_from_image(invoice.file_path)
+
+        if rksv:
+            date, amount = rksv.date, rksv.amount
+            print(f"RKSV QR decoded: date={date} amount={amount}", flush=True)
+        else:
+            # Fall back to full OCR + regex
+            text = _run(pdf_to_text(invoice.file_path))
+            parsed = parse_pharmacy_receipt(text)
+            date, amount = parsed.date, parsed.amount
+            print(f"OCR fallback: date={date} amount={amount}", flush=True)
 
         async def _update():
             async with AsyncSessionLocal() as db:
                 inv = await db.get(Invoice, invoice_id)
                 if inv:
-                    inv.amount = parsed.amount
-                    inv.date = parsed.date
+                    inv.amount = amount
+                    inv.date = date
                     # Pharmacy receipts skip ÖGK — go straight to Merkur
                     inv.status = InvoiceStatus.READY_FOR_MERKUR
                     await db.commit()

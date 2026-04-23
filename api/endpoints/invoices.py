@@ -1,16 +1,59 @@
+import shutil
+import uuid
+from pathlib import Path
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_current_user
+from core.config import get_settings
 from core.database import get_db
 from models.domain import Invoice, InvoiceStatus, User
 from schemas.payload import InvoiceCreate, InvoiceRead, InvoiceStatusUpdate
 from workers.tasks import run_ocr, submit_to_merkur
 
+settings = get_settings()
+
+_ALLOWED_MIME_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "application/pdf",
+}
+
 router = APIRouter(prefix="/invoices", tags=["invoices"])
+
+
+@router.post("/upload", response_model=InvoiceRead, status_code=status.HTTP_201_CREATED)
+async def upload_invoice(
+    file: Annotated[UploadFile, File(...)],
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if file.content_type not in _ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Unsupported file type: {file.content_type}. Allowed: jpeg, png, webp, pdf.",
+        )
+
+    ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename and "." in file.filename else "jpg"
+    dest_dir = Path(settings.storage_root) / str(current_user.id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / f"{uuid.uuid4()}.{ext}"
+
+    with dest_path.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+
+    invoice = Invoice(user_id=current_user.id, file_path=str(dest_path))
+    db.add(invoice)
+    await db.commit()
+    await db.refresh(invoice)
+
+    run_ocr.delay(str(invoice.id))
+    return invoice
 
 
 @router.post("/", response_model=InvoiceRead, status_code=status.HTTP_201_CREATED)

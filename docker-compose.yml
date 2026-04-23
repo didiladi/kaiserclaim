@@ -8,6 +8,7 @@ x-app-env: &app-env
     CELERY_BROKER_URL: redis://redis:6379/0
     CELERY_RESULT_BACKEND: redis://redis:6379/1
     STORAGE_ROOT: /mnt/storage
+    DISPLAY: ""
 
 x-app-volumes: &app-volumes
   - storage:/mnt/storage
@@ -79,10 +80,6 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
-    # Workers that drive the OGK bot need a display (or Xvfb) when running
-    # non-headless. For the pharmacy MVP (Merkur only, headless) this is fine as-is.
-    environment:
-      DISPLAY: ""
 
 volumes:
   postgres_data:

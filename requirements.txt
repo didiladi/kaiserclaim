@@ -17,7 +17,13 @@ celery[redis]==5.4.0
 
 # OCR
 ocrmypdf==16.7.0
-pypdf==5.1.0
+pikepdf<9.0
+Pillow
+
+# QR code decoding
+pyzbar
+zxing-cpp
+numpy
 
 # Browser automation
 playwright==1.49.0

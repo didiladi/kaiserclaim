@@ -23,15 +23,15 @@ def _run_ocr(src: Path, dest: Path) -> None:
     ocrmypdf.ocr(
         src,
         dest,
-        language="deu",          # Austrian documents are German
+        language="deu",
         deskew=True,
         force_ocr=True,
         progress_bar=False,
+        image_dpi=300,  # phone photos report 72 DPI in EXIF but are much denser
     )
 
 
 def _extract_text(pdf_path: Path) -> str:
-    import pypdf
+    from pdfminer.high_level import extract_text
 
-    reader = pypdf.PdfReader(str(pdf_path))
-    return "\n".join(page.extract_text() or "" for page in reader.pages)
+    return extract_text(str(pdf_path))
