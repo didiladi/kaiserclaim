@@ -46,3 +46,7 @@ storage/
 
 # Docker
 *.tar
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
