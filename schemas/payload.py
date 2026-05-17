@@ -84,6 +84,7 @@ class InvoiceCreate(BaseModel):
     patient_name: Optional[str] = None
     amount: Optional[float] = None
     date: Optional[datetime] = None
+    benefit_rule_id: Optional[uuid.UUID] = None
 
 
 class InvoiceStatusUpdate(BaseModel):
@@ -98,6 +99,7 @@ class InvoiceRead(_Base):
     patient_name: Optional[str]
     amount: Optional[float]
     date: Optional[datetime]
+    benefit_rule_id: Optional[uuid.UUID]
     status: InvoiceStatus
     created_at: datetime
     updated_at: datetime

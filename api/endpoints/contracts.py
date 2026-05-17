@@ -9,6 +9,7 @@ from core.config import get_settings
 from core.database import get_db
 from models.domain import BenefitRule, InsuranceContract, User
 from schemas.payload import (
+    BenefitRuleCreate,
     BenefitRuleRead,
     BenefitRuleWithRemaining,
     ContractCreate,
@@ -19,6 +20,19 @@ from services.ocr_engine import pdf_to_text
 
 settings = get_settings()
 router = APIRouter(prefix="/contracts", tags=["contracts"])
+
+
+@router.get("/", response_model=list[ContractRead])
+async def list_contracts(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(InsuranceContract)
+        .where(InsuranceContract.user_id == current_user.id)
+        .order_by(InsuranceContract.created_at.desc())
+    )
+    return result.scalars().all()
 
 
 @router.post("/", response_model=ContractRead, status_code=status.HTTP_201_CREATED)
@@ -109,6 +123,22 @@ async def get_benefit_quotas(
             )
         )
     return enriched
+
+
+@router.post("/{contract_id}/benefits", response_model=BenefitRuleRead, status_code=status.HTTP_201_CREATED)
+async def create_benefit_rule(
+    contract_id: UUID,
+    payload: BenefitRuleCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    contract = await db.get(InsuranceContract, contract_id)
+    _assert_owned(contract, current_user.id)
+    rule = BenefitRule(contract_id=contract_id, **payload.model_dump())
+    db.add(rule)
+    await db.commit()
+    await db.refresh(rule)
+    return rule
 
 
 def _assert_owned(obj, user_id: UUID) -> None:

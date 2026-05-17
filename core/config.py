@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     debug: bool = False
     secret_key: str = "change-me-in-production"
 
+    # Set to True to skip real Merkur portal submission (for local testing)
+    merkur_dry_run: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

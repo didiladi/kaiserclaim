@@ -19,6 +19,7 @@ celery[redis]==5.4.0
 ocrmypdf==16.7.0
 pikepdf<9.0
 Pillow
+pdfminer.six==20240706
 
 # QR code decoding
 pyzbar

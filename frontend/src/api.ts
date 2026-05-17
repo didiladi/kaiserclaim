@@ -10,6 +10,7 @@ export interface Invoice {
   patient_name: string | null;
   amount: number | null;
   date: string | null;
+  benefit_rule_id: string | null;
   status: InvoiceStatus;
   created_at: string;
   updated_at: string;
@@ -59,9 +60,10 @@ export function getInvoice(id: string): Promise<Invoice> {
   return apiFetch<Invoice>(`/invoices/${id}`);
 }
 
-export async function uploadInvoice(file: File): Promise<Invoice> {
+export async function uploadInvoice(file: File, benefitRuleId?: string): Promise<Invoice> {
   const form = new FormData();
   form.append("file", file);
+  if (benefitRuleId) form.append("benefit_rule_id", benefitRuleId);
   const sep = "?";
   const res = await fetch(`${BASE}/invoices/upload${sep}user_id=${USER_ID}`, {
     method: "POST",

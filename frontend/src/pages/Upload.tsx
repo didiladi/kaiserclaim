@@ -1,6 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { uploadInvoice } from "../api";
+import { BenefitRule, Contract, getBenefits, listContracts, uploadInvoice } from "../api";
 
 export default function Upload() {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -10,6 +10,23 @@ export default function Upload() {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
+
+  // Benefit selection
+  const [contracts, setContracts] = useState<Contract[]>([]);
+  const [benefits, setBenefits] = useState<BenefitRule[]>([]);
+  const [selectedContractId, setSelectedContractId] = useState<string>("");
+  const [selectedBenefitId, setSelectedBenefitId] = useState<string>("");
+
+  useEffect(() => {
+    listContracts().then(setContracts).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    setBenefits([]);
+    setSelectedBenefitId("");
+    if (!selectedContractId) return;
+    getBenefits(selectedContractId).then(setBenefits).catch(() => {});
+  }, [selectedContractId]);
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -31,7 +48,7 @@ export default function Upload() {
     setUploading(true);
     setError(null);
     try {
-      await uploadInvoice(file);
+      await uploadInvoice(file, selectedBenefitId || undefined);
       navigate("/invoices");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
@@ -67,6 +84,38 @@ export default function Upload() {
           onChange={handleFileChange}
         />
       </div>
+
+      {contracts.length > 0 && (
+        <div className="mt-4 space-y-2">
+          <label className="block text-sm font-medium text-gray-700">
+            Benefit (optional)
+          </label>
+          <select
+            value={selectedContractId}
+            onChange={e => setSelectedContractId(e.target.value)}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+          >
+            <option value="">— select contract —</option>
+            {contracts.map(c => (
+              <option key={c.id} value={c.id}>{c.provider_name}</option>
+            ))}
+          </select>
+          {benefits.length > 0 && (
+            <select
+              value={selectedBenefitId}
+              onChange={e => setSelectedBenefitId(e.target.value)}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+            >
+              <option value="">— no benefit —</option>
+              {benefits.map(b => (
+                <option key={b.id} value={b.id}>
+                  {b.benefit_name} (limit: €{b.limit_amount})
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+      )}
 
       {error && (
         <p className="mt-3 text-sm text-red-600">{error}</p>

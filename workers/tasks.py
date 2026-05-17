@@ -13,7 +13,8 @@ from celery import Celery
 
 from core.config import get_settings
 from core.database import AsyncSessionLocal
-from models.domain import Invoice, InvoiceStatus
+from models.domain import BenefitUsage, Invoice, InvoiceStatus
+from sqlalchemy import select
 from services.ocr_engine import pdf_to_text
 from services.regex_parser import parse_pharmacy_receipt
 from services.rksv_parser import extract_rksv_from_image
@@ -54,6 +55,28 @@ async def _set_status(invoice_id: str, status: InvoiceStatus) -> None:
 async def _get_invoice(invoice_id: str) -> Invoice | None:
     async with AsyncSessionLocal() as db:
         return await db.get(Invoice, invoice_id)
+
+
+async def _finalize_invoice(invoice_id: str) -> None:
+    """Write BenefitUsage (idempotent) and transition invoice to COMPLETED."""
+    async with AsyncSessionLocal() as db:
+        invoice = await db.get(Invoice, invoice_id)
+        if not invoice:
+            return
+
+        if invoice.benefit_rule_id and invoice.amount is not None:
+            existing = await db.execute(
+                select(BenefitUsage).where(BenefitUsage.invoice_id == invoice.id)
+            )
+            if existing.scalar_one_or_none() is None:
+                db.add(BenefitUsage(
+                    invoice_id=invoice.id,
+                    benefit_rule_id=invoice.benefit_rule_id,
+                    amount_used=invoice.amount,
+                ))
+
+        invoice.status = InvoiceStatus.COMPLETED
+        await db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -111,19 +134,22 @@ def submit_to_merkur(self, invoice_id: str) -> dict:
         if not invoice:
             raise ValueError(f"Invoice {invoice_id} not found")
 
-        bot = MerkurBot()
-        date_str = invoice.date.strftime("%d.%m.%Y") if invoice.date else ""
-        success = _run(bot.submit_pharmacy_receipt(
-            invoice_pdf=invoice.file_path,
-            amount=invoice.amount or 0.0,
-            date=date_str,
-        ))
-
-        if not success:
-            raise RuntimeError("Merkur submission did not return a success signal")
+        if settings.merkur_dry_run:
+            print(f"[DRY RUN] Skipping Merkur portal submission for invoice {invoice_id}", flush=True)
+        else:
+            bot = MerkurBot()
+            date_str = invoice.date.strftime("%d.%m.%Y") if invoice.date else ""
+            success = _run(bot.submit_pharmacy_receipt(
+                invoice_pdf=invoice.file_path,
+                amount=invoice.amount or 0.0,
+                date=date_str,
+            ))
+            if not success:
+                raise RuntimeError("Merkur submission did not return a success signal")
 
         _run(_set_status(invoice_id, InvoiceStatus.MERKUR_SUBMITTED))
-        return {"invoice_id": invoice_id, "status": "MERKUR_SUBMITTED"}
+        _run(_finalize_invoice(invoice_id))
+        return {"invoice_id": invoice_id, "status": "COMPLETED"}
 
     except Exception as exc:
         raise self.retry(exc=exc)

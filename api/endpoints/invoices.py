@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +30,7 @@ router = APIRouter(prefix="/invoices", tags=["invoices"])
 @router.post("/upload", response_model=InvoiceRead, status_code=status.HTTP_201_CREATED)
 async def upload_invoice(
     file: Annotated[UploadFile, File(...)],
+    benefit_rule_id: Annotated[UUID | None, Form()] = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -47,7 +48,7 @@ async def upload_invoice(
     with dest_path.open("wb") as out:
         shutil.copyfileobj(file.file, out)
 
-    invoice = Invoice(user_id=current_user.id, file_path=str(dest_path))
+    invoice = Invoice(user_id=current_user.id, file_path=str(dest_path), benefit_rule_id=benefit_rule_id)
     db.add(invoice)
     await db.commit()
     await db.refresh(invoice)

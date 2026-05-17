@@ -89,6 +89,8 @@ class Invoice(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
+    benefit_rule_id = Column(UUID(as_uuid=True), ForeignKey("benefit_rules.id", ondelete="SET NULL"), nullable=True, index=True)
+
     user = relationship("User", back_populates="invoices")
     benefit_usages = relationship("BenefitUsage", back_populates="invoice", cascade="all, delete-orphan")
 
