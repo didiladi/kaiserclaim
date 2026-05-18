@@ -61,14 +61,6 @@ class MerkurBot:
         # Navigate directly to the submission form (session cookie handles auth).
         await page.goto(_MERKUR_FORM_URL, wait_until="networkidle")
 
-        # If the session has expired the portal redirects to the OAuth login page.
-        if "login" in page.url.lower() or "loginapp" in page.url.lower():
-            raise RuntimeError(
-                "Merkur session expired — run scripts/calibrate_merkur.py with "
-                "headless=False to log in and refresh the session in "
-                f"{_MERKUR_USER_DATA_DIR}"
-            )
-
         # Dismiss the CCM19 cookie consent banner if present.
         for _sel in ["button[aria-label='Ablehnen']", "button[aria-label='Alles akzeptieren']"]:
             try:
@@ -79,6 +71,26 @@ class MerkurBot:
                     break
             except Exception:
                 continue
+
+        # Auto-login if the portlet shows a login form (session expired or not yet set).
+        # Selectors confirmed by calibration: #username, #password, #btlogin.
+        _needs_login = (
+            "login" in page.url.lower()
+            or "loginapp" in page.url.lower()
+            or await page.locator("#btlogin").count() > 0
+        )
+        if _needs_login:
+            _toggle = page.locator("#bt_login")
+            if await _toggle.count() > 0 and await page.locator("#username").count() == 0:
+                await _toggle.click()
+                await page.wait_for_timeout(800)
+            await page.fill("#username", settings.merkur_username)
+            await page.fill("#password", settings.merkur_password)
+            await page.click("#btlogin")
+            await page.wait_for_load_state("networkidle")
+            await page.wait_for_timeout(2_000)
+            if "leistungseinreichung" not in page.url:
+                await page.goto(_MERKUR_FORM_URL, wait_until="networkidle")
 
         # Wait for the Liferay/Vue portlet to finish rendering.
         # TODO: replace with a stable element selector once calibrated.

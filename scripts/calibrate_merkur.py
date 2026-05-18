@@ -196,6 +196,56 @@ async def dump_live_elements(page: Page, label: str) -> None:
     print(f"  [elements] {dest}")
 
 
+async def _ensure_logged_in(page: Page) -> None:
+    """Auto-login using confirmed selectors (#username, #password, #btlogin)."""
+    from core.config import get_settings
+    settings = get_settings()
+
+    on_login_url = "login" in page.url.lower() or "loginapp" in page.url.lower()
+    has_login_form = await page.locator("#btlogin").count() > 0
+
+    if not on_login_url and not has_login_form:
+        print("  Session active — skipping login.")
+        return
+
+    print("  Login form detected — attempting auto-login…")
+
+    # The Anmelden toggle may need to be clicked to reveal the form
+    toggle = page.locator("#bt_login")
+    if await toggle.count() > 0 and await page.locator("#username").count() == 0:
+        await toggle.click()
+        await page.wait_for_timeout(800)
+
+    if not settings.merkur_username:
+        print("  MERKUR_USERNAME not set — pausing for manual login.")
+        try:
+            await page.pause()
+        except Exception:
+            return
+    else:
+        try:
+            await page.fill("#username", settings.merkur_username)
+            await page.fill("#password", settings.merkur_password)
+            await page.click("#btlogin")
+            await page.wait_for_load_state("networkidle")
+            await page.wait_for_timeout(2_000)
+            print(f"  Auto-login done — now at: {page.url}")
+        except Exception as e:
+            print(f"  Auto-login failed ({e}) — pausing for manual login.")
+            try:
+                await page.pause()
+            except Exception:
+                return
+
+    # If the login redirected away from the form, navigate back
+    if "leistungseinreichung" not in page.url:
+        print(f"  Navigating back to form from {page.url}…")
+        await page.goto(FORM_URL, wait_until="networkidle")
+        await dismiss_cookie_banner(page)
+        await page.wait_for_timeout(2_000)
+        print(f"  Now at: {page.url}")
+
+
 async def run(receipt_path: str | None) -> None:
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
@@ -215,31 +265,15 @@ async def run(receipt_path: str | None) -> None:
         page = context.pages[0] if context.pages else await context.new_page()
 
         # ------------------------------------------------------------------
-        # Step 1: go directly to the submission form URL (session may be live)
+        # Step 1: navigate and auto-login if needed
         # ------------------------------------------------------------------
         print("Step 1: navigating to submission form…")
         await page.goto(FORM_URL, wait_until="networkidle")
+        await dismiss_cookie_banner(page)
+        await page.wait_for_timeout(1_000)
         print(f"  Landed at: {page.url}")
 
-        if "login" in page.url.lower() or "loginapp" in page.url.lower():
-            print("\n  Not logged in — log in in the browser window.")
-            print("  After login, click Resume in the Inspector.")
-            await snapshot(page, "01_login")
-            login_results = await probe_selectors(page, "login_page")
-            print_probe_results("login_page", login_results)
-            await dump_live_elements(page, "01_login")
-            try:
-                await page.pause()
-            except Exception:
-                print("  Browser closed — exiting.")
-                return
-
-            print("  Waiting to land back at the form page…")
-            await page.wait_for_url(f"{PORTAL_URL}**", timeout=180_000)
-            await page.goto(FORM_URL, wait_until="networkidle")
-            print(f"  Now at: {page.url}")
-        else:
-            print("  Session active — already logged in.")
+        await _ensure_logged_in(page)
 
         # Dismiss cookie consent banner before the portlet renders
         await dismiss_cookie_banner(page)
@@ -248,7 +282,7 @@ async def run(receipt_path: str | None) -> None:
         print("  Waiting for Vue portlet to render…")
         await page.wait_for_load_state("networkidle")
         await page.wait_for_timeout(3_000)
-        await dismiss_cookie_banner(page)  # dismiss again if it re-appeared after load
+        await dismiss_cookie_banner(page)
 
         await snapshot(page, "02_submission_list")
         await dump_live_elements(page, "02_submission_list")
