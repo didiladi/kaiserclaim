@@ -69,6 +69,17 @@ class MerkurBot:
                 f"{_MERKUR_USER_DATA_DIR}"
             )
 
+        # Dismiss the CCM19 cookie consent banner if present.
+        for _sel in ["button[aria-label='Ablehnen']", "button[aria-label='Alles akzeptieren']"]:
+            try:
+                btn = page.locator(_sel)
+                if await btn.count() > 0 and await btn.first.is_visible():
+                    await btn.first.click()
+                    await page.wait_for_timeout(500)
+                    break
+            except Exception:
+                continue
+
         # Wait for the Liferay/Vue portlet to finish rendering.
         # TODO: replace with a stable element selector once calibrated.
         await page.wait_for_timeout(3_000)

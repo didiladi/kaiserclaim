@@ -97,6 +97,20 @@ PROBES: dict[str, dict[str, list[str]]] = {
 }
 
 
+async def dismiss_cookie_banner(page: Page) -> None:
+    """Click 'Ablehnen' on the CCM19 cookie consent banner if it appears."""
+    for sel in ["button[aria-label='Ablehnen']", "button[aria-label='Alles akzeptieren']"]:
+        try:
+            btn = page.locator(sel)
+            if await btn.count() > 0 and await btn.first.is_visible():
+                await btn.first.click()
+                print(f"  [cookie] dismissed banner via {sel!r}")
+                await page.wait_for_timeout(500)
+                return
+        except Exception:
+            continue
+
+
 async def probe_selectors(page: Page, stage: str) -> dict[str, str | None]:
     results: dict[str, str | None] = {}
     for field, candidates in PROBES.get(stage, {}).items():
@@ -214,7 +228,11 @@ async def run(receipt_path: str | None) -> None:
             login_results = await probe_selectors(page, "login_page")
             print_probe_results("login_page", login_results)
             await dump_live_elements(page, "01_login")
-            await page.pause()
+            try:
+                await page.pause()
+            except Exception:
+                print("  Browser closed — exiting.")
+                return
 
             print("  Waiting to land back at the form page…")
             await page.wait_for_url(f"{PORTAL_URL}**", timeout=180_000)
@@ -223,10 +241,14 @@ async def run(receipt_path: str | None) -> None:
         else:
             print("  Session active — already logged in.")
 
+        # Dismiss cookie consent banner before the portlet renders
+        await dismiss_cookie_banner(page)
+
         # Wait for the Liferay/Vue portlet to render
         print("  Waiting for Vue portlet to render…")
         await page.wait_for_load_state("networkidle")
         await page.wait_for_timeout(3_000)
+        await dismiss_cookie_banner(page)  # dismiss again if it re-appeared after load
 
         await snapshot(page, "02_submission_list")
         await dump_live_elements(page, "02_submission_list")
@@ -243,11 +265,16 @@ async def run(receipt_path: str | None) -> None:
             print(f"  [click] Neue Einreichung via {new_sub_sel!r}")
         else:
             print("  'Neue Einreichung' not found — pausing.")
-            print("  Use the Inspector to find its selector, click it, then Resume.")
-            await page.pause()
+            print("  Click it in the browser, then Resume.")
+            try:
+                await page.pause()
+            except Exception:
+                print("  Browser closed — exiting.")
+                return
 
         await page.wait_for_load_state("networkidle")
         await page.wait_for_timeout(3_000)
+        await dismiss_cookie_banner(page)
         await snapshot(page, "03_submission_form")
         await dump_live_elements(page, "03_submission_form")
         form_results = await probe_selectors(page, "submission_form")
@@ -276,7 +303,11 @@ async def run(receipt_path: str | None) -> None:
                             continue
                     if not found:
                         print("  File trigger not found — pausing to pick manually.")
-                        await page.pause()
+                        try:
+                            await page.pause()
+                        except Exception:
+                            print("  Browser closed — exiting.")
+                            return
                 fc = await fc_info.value
                 await fc.set_files(receipt_path)
                 print(f"  [file] set to {receipt_path}")
@@ -335,7 +366,10 @@ async def run(receipt_path: str | None) -> None:
         print("  4. pytest tests/test_merkur_bot.py\n")
 
         print("Pausing before close — inspect the browser, then click Resume.")
-        await page.pause()
+        try:
+            await page.pause()
+        except Exception:
+            pass
         await context.close()
 
 
