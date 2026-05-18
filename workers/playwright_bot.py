@@ -29,25 +29,48 @@ class MerkurBot:
         invoice_pdf: str,
         amount: float,
         date: str,
+        stop_before_submit: bool = False,
     ) -> bool:
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True)
             context = await browser.new_context(accept_downloads=True)
             page = await context.new_page()
             try:
-                success = await self._submit(page, invoice_pdf, amount, date)
+                success = await self._submit(
+                    page, invoice_pdf, amount, date, stop_before_submit
+                )
                 return success
             finally:
                 await browser.close()
 
-    async def _submit(self, page: Page, invoice_pdf: str, amount: float, date: str) -> bool:
+    async def _submit(
+        self,
+        page: Page,
+        invoice_pdf: str,
+        amount: float,
+        date: str,
+        stop_before_submit: bool = False,
+    ) -> bool:
         await page.goto(_MERKUR_PORTAL_URL, wait_until="networkidle")
 
-        # --- Login step (credentials from env) ---
+        # --- Login ---
+        # TODO: replace these selectors with calibrated values from scripts/calibrate_merkur.py
         await page.fill("#username", settings.merkur_username)
         await page.fill("#password", settings.merkur_password)
         await page.click("button[type=submit]")
         await page.wait_for_load_state("networkidle")
+
+        # Verify login succeeded: if we're still on the login page, credentials are wrong.
+        url = page.url.lower()
+        still_on_login = (
+            "login" in url
+            or "anmelden" in url
+            or await page.locator("#username").count() > 0
+        )
+        if still_on_login:
+            raise RuntimeError(
+                "Merkur login failed — check MERKUR_USERNAME / MERKUR_PASSWORD in .env"
+            )
 
         # --- Navigate to refund submission ---
         await page.click("text=Kostenerstattung")
@@ -64,10 +87,14 @@ class MerkurBot:
         await page.fill("input[name=amount]", str(amount))
         await page.fill("input[name=date]", date)
 
+        if stop_before_submit:
+            return False
+
         # --- Submit ---
         await page.click("button[type=submit]")
         await page.wait_for_load_state("networkidle")
 
+        # TODO: replace with a specific confirmation element found during calibration
         return "erfolgreich" in (await page.text_content("body") or "").lower()
 
 

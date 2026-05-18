@@ -41,6 +41,10 @@ htmlcov/
 .oegk_browser_session/
 **/oegk_browser_session/
 
+# Raw Merkur calibration captures (may contain PII — never commit)
+# Only sanitized copies go in tests/fixtures/merkur/
+scripts/.merkur_capture/
+
 # Local storage mount (not real files, just a mount point)
 storage/
 

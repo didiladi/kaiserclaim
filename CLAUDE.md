@@ -65,3 +65,24 @@ All configuration lives in `core/config.py` (`Settings` via `pydantic-settings`)
 2. Add Pydantic `Create` / `Read` schemas to `schemas/payload.py`.
 3. Run `alembic revision --autogenerate -m "add <model>"` — review the generated file before applying.
 4. Import the model in `alembic/env.py` (it already imports `Base` from `models/domain`; just ensure the class is defined there).
+
+### Merkur portal selector calibration
+
+All selectors in `MerkurBot._submit` (`workers/playwright_bot.py`) must be validated against
+the live Merkur portal before the first real submission. Run the calibration harness once:
+
+```bash
+# requires a display (headed browser) and .env credentials
+playwright install chromium
+python scripts/calibrate_merkur.py [--receipt path/to/receipt.pdf]
+```
+
+The harness walks through the full submission flow, stops before the final submit, and
+prints which candidate selectors matched. Raw HTML snapshots land in `scripts/.merkur_capture/`
+(gitignored — may contain PII).
+
+After calibration:
+1. Update selectors in `workers/playwright_bot.py` with the confirmed values.
+2. Strip PII from the snapshots (name, policy number, address).
+3. Copy sanitized HTML to `tests/fixtures/merkur/` and commit.
+4. Run `pytest tests/test_merkur_bot.py` — selector assertions must pass before any selector change is merged.
