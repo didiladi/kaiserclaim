@@ -45,6 +45,10 @@ htmlcov/
 # Only sanitized copies go in tests/fixtures/merkur/
 scripts/.merkur_capture/
 
+# Merkur browser session (contains OAuth cookies — never commit)
+scripts/.merkur_session/
+**/.merkur_browser_session/
+
 # Local storage mount (not real files, just a mount point)
 storage/
 

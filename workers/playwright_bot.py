@@ -1,7 +1,9 @@
 """
 Playwright automation bots.
 
-- MerkurBot: fully headless, submits invoice PDF to Merkur portal.
+- MerkurBot: uses a persistent browser context so the OAuth session survives
+  across runs. The portal is at https://portal.merkur.at/ (OAuth2/Liferay).
+  Run scripts/calibrate_merkur.py once to seed the session and discover selectors.
 - OegkBot: uses a persistent browser context so the ID-Austria 2FA session
   survives across runs (the user authenticates once; subsequent runs reuse cookies).
 """
@@ -14,13 +16,15 @@ from core.config import get_settings
 
 settings = get_settings()
 
+_MERKUR_USER_DATA_DIR = Path(settings.storage_root) / ".merkur_browser_session"
 _OEGK_USER_DATA_DIR = Path(settings.storage_root) / ".oegk_browser_session"
-_MERKUR_PORTAL_URL = "https://www.merkur.at/kundenportal"
+_MERKUR_PORTAL_URL = "https://portal.merkur.at/"
+_MERKUR_FORM_URL = "https://portal.merkur.at/de/leistungseinreichung"
 _OEGK_PORTAL_URL = "https://www.oegk.at/kundenportal"
 
 
 # ---------------------------------------------------------------------------
-# Merkur (fully headless)
+# Merkur (persistent session — OAuth login survives across runs)
 # ---------------------------------------------------------------------------
 
 class MerkurBot:
@@ -31,17 +35,20 @@ class MerkurBot:
         date: str,
         stop_before_submit: bool = False,
     ) -> bool:
+        _MERKUR_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)
-            context = await browser.new_context(accept_downloads=True)
-            page = await context.new_page()
+            context: BrowserContext = await pw.chromium.launch_persistent_context(
+                str(_MERKUR_USER_DATA_DIR),
+                headless=True,
+                accept_downloads=True,
+            )
+            page = context.pages[0] if context.pages else await context.new_page()
             try:
-                success = await self._submit(
+                return await self._submit(
                     page, invoice_pdf, amount, date, stop_before_submit
                 )
-                return success
             finally:
-                await browser.close()
+                await context.close()
 
     async def _submit(
         self,
@@ -51,39 +58,36 @@ class MerkurBot:
         date: str,
         stop_before_submit: bool = False,
     ) -> bool:
-        await page.goto(_MERKUR_PORTAL_URL, wait_until="networkidle")
+        # Navigate directly to the submission form (session cookie handles auth).
+        await page.goto(_MERKUR_FORM_URL, wait_until="networkidle")
 
-        # --- Login ---
-        # TODO: replace these selectors with calibrated values from scripts/calibrate_merkur.py
-        await page.fill("#username", settings.merkur_username)
-        await page.fill("#password", settings.merkur_password)
-        await page.click("button[type=submit]")
-        await page.wait_for_load_state("networkidle")
-
-        # Verify login succeeded: if we're still on the login page, credentials are wrong.
-        url = page.url.lower()
-        still_on_login = (
-            "login" in url
-            or "anmelden" in url
-            or await page.locator("#username").count() > 0
-        )
-        if still_on_login:
+        # If the session has expired the portal redirects to the OAuth login page.
+        if "login" in page.url.lower() or "loginapp" in page.url.lower():
             raise RuntimeError(
-                "Merkur login failed — check MERKUR_USERNAME / MERKUR_PASSWORD in .env"
+                "Merkur session expired — run scripts/calibrate_merkur.py with "
+                "headless=False to log in and refresh the session in "
+                f"{_MERKUR_USER_DATA_DIR}"
             )
 
-        # --- Navigate to refund submission ---
-        await page.click("text=Kostenerstattung")
+        # Wait for the Liferay/Vue portlet to finish rendering.
+        # TODO: replace with a stable element selector once calibrated.
+        await page.wait_for_timeout(3_000)
+
+        # --- Navigate to new submission form ---
+        # TODO: replace with calibrated selector for "Neue Einreichung" button.
         await page.click("text=Neue Einreichung")
-        await page.wait_for_selector("input[type=file]")
+        await page.wait_for_timeout(2_000)
 
         # --- Upload invoice PDF ---
+        # TODO: replace with calibrated file-trigger selector.
+        await page.wait_for_selector("input[type=file]")
         async with page.expect_file_chooser() as fc_info:
             await page.click("text=Datei hochladen")
         file_chooser = await fc_info.value
         await file_chooser.set_files(invoice_pdf)
 
         # --- Fill metadata ---
+        # TODO: replace with calibrated amount/date selectors.
         await page.fill("input[name=amount]", str(amount))
         await page.fill("input[name=date]", date)
 
@@ -91,10 +95,11 @@ class MerkurBot:
             return False
 
         # --- Submit ---
+        # TODO: replace with calibrated submit-button selector.
         await page.click("button[type=submit]")
         await page.wait_for_load_state("networkidle")
 
-        # TODO: replace with a specific confirmation element found during calibration
+        # TODO: replace with a specific confirmation element found during calibration.
         return "erfolgreich" in (await page.text_content("body") or "").lower()
 
 

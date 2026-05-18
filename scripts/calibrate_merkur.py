@@ -2,137 +2,102 @@
 """
 Merkur portal calibration harness.
 
-Launches a headed browser, logs in with your stored credentials, walks through
-the reimbursement submission flow step by step, snapshots each page to
+Launches a headed browser with a persistent session, walks through the
+reimbursement submission flow step by step, snapshots each page to
 scripts/.merkur_capture/, and probes candidate selectors at each stage.
 
-Run this ONCE against the live portal to validate (or correct) every selector
-used by MerkurBot._submit. The harness stops before the final submit — no
-real claim is filed.
+The session is saved to scripts/.merkur_session/ so subsequent bot runs can
+reuse it without logging in again. Run this once to seed the session.
+
+The harness stops before the final submit — no real claim is filed.
 
 Usage:
     cd kaiserclaim
     python scripts/calibrate_merkur.py [--receipt PATH]
 
 Flags:
-    --receipt PATH   Path to an invoice PDF/JPG to test the file-upload step.
-                     Omit to skip file upload (form selectors are still probed).
+    --receipt PATH   Invoice PDF/JPG to test the file-upload step (optional).
 
 Requirements:
     playwright install chromium
-    .env must have MERKUR_USERNAME and MERKUR_PASSWORD set.
 """
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
 
-from playwright.async_api import Page, async_playwright
+from playwright.async_api import BrowserContext, Page, async_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.config import get_settings
 
 CAPTURE_DIR = Path(__file__).parent / ".merkur_capture"
-PORTAL_URL = "https://www.merkur.at/kundenportal"
+SESSION_DIR = Path(__file__).parent / ".merkur_session"
+PORTAL_URL = "https://portal.merkur.at/"
+FORM_URL = "https://portal.merkur.at/de/leistungseinreichung"
 
 # ---------------------------------------------------------------------------
-# Candidate selector probes — ordered from most to least specific
+# Candidate selector probes (used after the page fully renders)
 # ---------------------------------------------------------------------------
 
 PROBES: dict[str, dict[str, list[str]]] = {
     "login_page": {
         "username": [
-            "#username",
-            "input[name=username]",
-            "input[type=email]",
-            "[name=email]",
+            "#username", "input[name=username]", "input[type=email]",
+            "[name=email]", "input[autocomplete=username]",
         ],
         "password": [
-            "#password",
-            "input[name=password]",
-            "input[type=password]",
+            "#password", "input[name=password]", "input[type=password]",
         ],
         "login_button": [
-            "button[type=submit]",
-            "button:has-text('Anmelden')",
-            "button:has-text('Login')",
-            "input[type=submit]",
-        ],
-        "login_error": [
-            ".error",
-            ".alert",
-            "[class*=error]",
-            "[class*=alert]",
-            "[role=alert]",
-            ".invalid-feedback",
-        ],
-    },
-    "dashboard": {
-        "reimbursement_nav": [
-            "text=Kostenerstattung",
-            "a:has-text('Kostenerstattung')",
-            "[href*=kostenerstattung]",
-            "[href*=Kostenerstattung]",
+            "button[type=submit]", "button:has-text('Anmelden')",
+            "button:has-text('Login')", "input[type=submit]",
         ],
     },
     "submission_list": {
         "new_submission": [
             "text=Neue Einreichung",
-            "a:has-text('Neue Einreichung')",
             "button:has-text('Neue Einreichung')",
-            "button:has-text('Einreichung')",
+            "a:has-text('Neue Einreichung')",
+            "button:has-text('Einreichung erstellen')",
+            "button:has-text('Neu')",
+            "[class*=btn]:has-text('Neu')",
         ],
     },
     "submission_form": {
         "file_input": [
-            "input[type=file]",
-            "input[accept]",
+            "input[type=file]", "input[accept]",
         ],
         "file_trigger": [
-            "text=Datei hochladen",
-            "button:has-text('hochladen')",
-            "label:has-text('hochladen')",
+            "text=Datei hochladen", "button:has-text('hochladen')",
+            "label:has-text('hochladen')", "button:has-text('Datei')",
+            "label:has-text('Datei')", "[class*=upload]",
         ],
         "amount": [
-            "input[name=amount]",
-            "#amount",
-            "input[id=amount]",
-            "input[placeholder*='Betrag']",
-            "input[placeholder*='betrag']",
+            "input[name=amount]", "#amount", "input[id=amount]",
+            "input[placeholder*='Betrag']", "input[placeholder*='betrag']",
+            "input[placeholder*='€']", "input[type=number]",
         ],
         "date": [
-            "input[name=date]",
-            "input[type=date]",
-            "#date",
-            "input[id=date]",
+            "input[name=date]", "input[type=date]", "#date",
+            "input[placeholder*='Datum']", "input[placeholder*='TT.MM']",
         ],
         "submit_button": [
-            "button[type=submit]",
-            "button:has-text('Einreichen')",
-            "button:has-text('Absenden')",
-            "button:has-text('Senden')",
+            "button[type=submit]", "button:has-text('Einreichen')",
+            "button:has-text('Absenden')", "button:has-text('Senden')",
         ],
     },
     "confirmation": {
-        "success_indicator": [
-            "text=erfolgreich",
-            "[class*=success]",
-            "[role=alert]",
-            ".confirmation",
-            ".success",
-        ],
-        "reference_number": [
-            "[class*=referenz]",
-            "[class*=nummer]",
-            "text=Referenz",
+        "success_text": [
+            "text=erfolgreich", "text=eingereicht", "[class*=success]",
+            "[role=alert]", ".confirmation",
         ],
     },
 }
 
 
 async def probe_selectors(page: Page, stage: str) -> dict[str, str | None]:
-    """Return field → first matching selector (or None) for the given stage."""
     results: dict[str, str | None] = {}
     for field, candidates in PROBES.get(stage, {}).items():
         winner = None
@@ -155,7 +120,7 @@ def print_probe_results(stage: str, results: dict[str, str | None]) -> None:
         if selector:
             print(f"  OK   {field:<28} {selector}")
         else:
-            print(f"  MISS {field:<28} (no candidate matched)")
+            print(f"  MISS {field:<28} (inspect below ↓)")
     print()
 
 
@@ -166,113 +131,132 @@ async def snapshot(page: Page, step: str) -> None:
     print(f"  [snapshot] {dest}")
 
 
-async def try_click(page: Page, candidates: list[str], label: str) -> bool:
-    for sel in candidates:
-        try:
-            if await page.locator(sel).count() >= 1:
-                await page.locator(sel).first.click()
-                print(f"  [click] {label} via {sel!r}")
-                return True
-        except Exception:
-            continue
-    return False
+async def dump_live_elements(page: Page, label: str) -> None:
+    """Extract all visible interactive elements from the live DOM and print them."""
+    elements = await page.evaluate("""() => {
+        const els = document.querySelectorAll(
+            'input:not([type=hidden]), button, select, textarea, [role=button]'
+        );
+        const results = [];
+        for (const el of els) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 && rect.height === 0) continue;
+            results.push({
+                tag:         el.tagName.toLowerCase(),
+                type:        el.type || '',
+                id:          el.id || '',
+                name:        el.name || '',
+                cls:         el.className?.toString().substring(0, 60) || '',
+                placeholder: el.placeholder || '',
+                ariaLabel:   el.getAttribute('aria-label') || '',
+                text:        el.innerText?.trim().substring(0, 80) || '',
+            });
+        }
+        return results;
+    }""")
+
+    print(f"\n  --- Live DOM elements on {label} ---")
+    for el in elements:
+        parts = [f"<{el['tag']}"]
+        if el["type"]:
+            parts.append(f" type={el['type']!r}")
+        if el["id"]:
+            parts.append(f" id={el['id']!r}")
+        if el["name"]:
+            parts.append(f" name={el['name']!r}")
+        if el["placeholder"]:
+            parts.append(f" placeholder={el['placeholder']!r}")
+        if el["ariaLabel"]:
+            parts.append(f" aria-label={el['ariaLabel']!r}")
+        if el["text"]:
+            parts.append(f">  {el['text']!r}")
+        else:
+            parts.append(">")
+        print("   ", "".join(parts))
+    print()
+
+    # Save as JSON for reference
+    dest = CAPTURE_DIR / f"{label.replace(' ', '_')}_elements.json"
+    CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(elements, ensure_ascii=False, indent=2))
+    print(f"  [elements] {dest}")
 
 
 async def run(receipt_path: str | None) -> None:
-    settings = get_settings()
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
 
     print("\nKaiserClaim — Merkur portal calibration harness")
     print(f"Portal  : {PORTAL_URL}")
-    print(f"User    : {settings.merkur_username or '(not set — check .env)'}")
+    print(f"Session : {SESSION_DIR}/  (reused across runs)")
     print(f"Captures: {CAPTURE_DIR}/\n")
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=False, slow_mo=200)
-        context = await browser.new_context()
-        page = await context.new_page()
+        context: BrowserContext = await pw.chromium.launch_persistent_context(
+            str(SESSION_DIR),
+            headless=False,
+            slow_mo=150,
+            accept_downloads=True,
+        )
+        page = context.pages[0] if context.pages else await context.new_page()
 
         # ------------------------------------------------------------------
-        # Step 1: navigate to portal
+        # Step 1: go directly to the submission form URL (session may be live)
         # ------------------------------------------------------------------
-        print("Step 1: navigating to portal…")
-        await page.goto(PORTAL_URL, wait_until="networkidle")
-        await snapshot(page, "01_login")
-        login_results = await probe_selectors(page, "login_page")
-        print_probe_results("login_page", login_results)
+        print("Step 1: navigating to submission form…")
+        await page.goto(FORM_URL, wait_until="networkidle")
+        print(f"  Landed at: {page.url}")
 
-        # ------------------------------------------------------------------
-        # Step 2: login
-        # ------------------------------------------------------------------
-        print("Step 2: logging in…")
-        if not settings.merkur_username:
-            print("  MERKUR_USERNAME not set in .env — pausing for manual login.")
-            print("  Log in in the browser window, then click Resume in the Inspector.")
+        if "login" in page.url.lower() or "loginapp" in page.url.lower():
+            print("\n  Not logged in — log in in the browser window.")
+            print("  After login, click Resume in the Inspector.")
+            await snapshot(page, "01_login")
+            login_results = await probe_selectors(page, "login_page")
+            print_probe_results("login_page", login_results)
+            await dump_live_elements(page, "01_login")
             await page.pause()
+
+            print("  Waiting to land back at the form page…")
+            await page.wait_for_url(f"{PORTAL_URL}**", timeout=180_000)
+            await page.goto(FORM_URL, wait_until="networkidle")
+            print(f"  Now at: {page.url}")
         else:
-            username_sel = login_results.get("username") or "#username"
-            password_sel = login_results.get("password") or "#password"
-            login_btn_sel = login_results.get("login_button") or "button[type=submit]"
-            try:
-                await page.fill(username_sel, settings.merkur_username)
-                await page.fill(password_sel, settings.merkur_password)
-                await page.click(login_btn_sel)
-                await page.wait_for_load_state("networkidle")
-            except Exception as e:
-                print(f"  Automated login failed: {e}")
-                print("  Log in manually in the browser, then click Resume.")
-                await page.pause()
+            print("  Session active — already logged in.")
 
-            # Verify we left the login page
-            url = page.url.lower()
-            still_on_login = (
-                "login" in url
-                or "anmelden" in url
-                or await page.locator(username_sel).count() > 0
-            )
-            if still_on_login:
-                print(f"  Post-login URL: {page.url}")
-                print("  Login may have failed or requires additional steps.")
-                print("  Complete login manually in the browser, then click Resume.")
-                await page.pause()
-            else:
-                print(f"  Login succeeded — now at: {page.url}")
-
-        await snapshot(page, "02_dashboard")
-        dashboard_results = await probe_selectors(page, "dashboard")
-        print_probe_results("dashboard", dashboard_results)
-
-        # ------------------------------------------------------------------
-        # Step 3: navigate to Kostenerstattung
-        # ------------------------------------------------------------------
-        print("Step 3: navigating to Kostenerstattung…")
-        nav_candidates = PROBES["dashboard"]["reimbursement_nav"]
-        if not await try_click(page, nav_candidates, "Kostenerstattung"):
-            print("  Could not find Kostenerstattung nav — pausing.")
-            print("  Click 'Kostenerstattung' in the browser, then click Resume.")
-            await page.pause()
+        # Wait for the Liferay/Vue portlet to render
+        print("  Waiting for Vue portlet to render…")
         await page.wait_for_load_state("networkidle")
-        await snapshot(page, "03_kostenerstattung")
+        await page.wait_for_timeout(3_000)
+
+        await snapshot(page, "02_submission_list")
+        await dump_live_elements(page, "02_submission_list")
         sub_list_results = await probe_selectors(page, "submission_list")
         print_probe_results("submission_list", sub_list_results)
 
         # ------------------------------------------------------------------
-        # Step 4: navigate to Neue Einreichung
+        # Step 2: click "Neue Einreichung"
         # ------------------------------------------------------------------
-        print("Step 4: navigating to Neue Einreichung…")
-        new_sub_candidates = PROBES["submission_list"]["new_submission"]
-        if not await try_click(page, new_sub_candidates, "Neue Einreichung"):
-            print("  Could not find 'Neue Einreichung' — pausing.")
-            print("  Click 'Neue Einreichung' in the browser, then click Resume.")
+        print("Step 2: clicking 'Neue Einreichung'…")
+        new_sub_sel = sub_list_results.get("new_submission")
+        if new_sub_sel:
+            await page.locator(new_sub_sel).first.click()
+            print(f"  [click] Neue Einreichung via {new_sub_sel!r}")
+        else:
+            print("  'Neue Einreichung' not found — pausing.")
+            print("  Use the Inspector to find its selector, click it, then Resume.")
             await page.pause()
+
         await page.wait_for_load_state("networkidle")
-        await snapshot(page, "04_submission_form")
+        await page.wait_for_timeout(3_000)
+        await snapshot(page, "03_submission_form")
+        await dump_live_elements(page, "03_submission_form")
         form_results = await probe_selectors(page, "submission_form")
         print_probe_results("submission_form", form_results)
 
         # ------------------------------------------------------------------
-        # Step 5: fill form — STOP BEFORE SUBMIT
+        # Step 3: fill form (stop before submit)
         # ------------------------------------------------------------------
-        print("Step 5: filling form (will NOT submit)…")
+        print("Step 3: filling form (will NOT submit)…")
 
         if receipt_path:
             file_trigger_candidates = PROBES["submission_form"]["file_trigger"]
@@ -280,16 +264,26 @@ async def run(receipt_path: str | None) -> None:
             try:
                 await page.wait_for_selector(file_input_sel, timeout=5_000)
                 async with page.expect_file_chooser(timeout=5_000) as fc_info:
-                    if not await try_click(page, file_trigger_candidates, "file trigger"):
-                        print("  File trigger not found — pausing.")
+                    found = False
+                    for sel in file_trigger_candidates:
+                        try:
+                            if await page.locator(sel).count() >= 1:
+                                await page.locator(sel).first.click()
+                                found = True
+                                print(f"  [click] file trigger via {sel!r}")
+                                break
+                        except Exception:
+                            continue
+                    if not found:
+                        print("  File trigger not found — pausing to pick manually.")
                         await page.pause()
                 fc = await fc_info.value
                 await fc.set_files(receipt_path)
                 print(f"  [file] set to {receipt_path}")
             except Exception as e:
-                print(f"  File upload step failed ({e}) — skipping.")
+                print(f"  File upload failed ({e}) — skipping.")
         else:
-            print("  No --receipt provided — skipping file upload.")
+            print("  No --receipt — skipping file upload.")
 
         amount_sel = form_results.get("amount") or "input[name=amount]"
         date_sel = form_results.get("date") or "input[name=date]"
@@ -304,53 +298,52 @@ async def run(receipt_path: str | None) -> None:
             except Exception as e:
                 print(f"  {label} fill failed: {e}")
 
-        await snapshot(page, "05_form_filled")
+        await snapshot(page, "04_form_filled")
         print("\n  *** STOPPED BEFORE SUBMIT — no claim was filed ***\n")
 
         # ------------------------------------------------------------------
         # Summary
         # ------------------------------------------------------------------
         all_results = {
-            "login_page": login_results,
-            "dashboard": dashboard_results,
             "submission_list": sub_list_results,
             "submission_form": form_results,
         }
 
         print("=" * 62)
         print("CALIBRATION SUMMARY")
-        print("Copy confirmed selectors into workers/playwright_bot.py")
+        print("Update confirmed selectors in workers/playwright_bot.py")
         print("=" * 62)
         any_miss = False
         for stage, r in all_results.items():
             for field, sel in r.items():
                 if sel:
-                    print(f"  OK   {stage}.{field:<30} {sel}")
+                    print(f"  OK   {stage}.{field:<35} {sel}")
                 else:
-                    print(f"  MISS {stage}.{field:<30} check snapshot HTML")
+                    print(f"  MISS {stage}.{field:<35} check *_elements.json")
                     any_miss = True
 
-        print(f"\nHTML snapshots saved to: {CAPTURE_DIR}/")
-        print("\nNext steps:")
+        print(f"\nHTML snapshots : {CAPTURE_DIR}/*.html")
+        print(f"Element dumps  : {CAPTURE_DIR}/*_elements.json")
         if any_miss:
-            print("  1. Open the MISS snapshots in a browser — inspect the DOM and")
-            print("     find the correct selector for each MISS field.")
-        print("  1. Update selectors in workers/playwright_bot.py with confirmed values.")
-        print("  2. Sanitize snapshots (strip name/policy/address) — see README note.")
-        print("  3. Copy sanitized HTML to tests/fixtures/merkur/")
-        print("  4. Run: pytest tests/test_merkur_bot.py\n")
+            print("\nFor MISS fields: open the *_elements.json file for the step,")
+            print("find the element you need, and build a selector from its id/name/text.")
+
+        print("\nNext steps:")
+        print("  1. Update TODO selectors in workers/playwright_bot.py.")
+        print("  2. Strip PII from HTML captures; copy to tests/fixtures/merkur/.")
+        print("  3. Update test constants in tests/test_merkur_bot.py.")
+        print("  4. pytest tests/test_merkur_bot.py\n")
 
         print("Pausing before close — inspect the browser, then click Resume.")
         await page.pause()
-        await browser.close()
+        await context.close()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Merkur portal calibration harness")
     parser.add_argument(
-        "--receipt",
-        metavar="PATH",
-        help="Invoice PDF/JPG to use for the file-upload step (optional)",
+        "--receipt", metavar="PATH",
+        help="Invoice PDF/JPG to test the file-upload step (optional)",
     )
     args = parser.parse_args()
     asyncio.run(run(args.receipt))
