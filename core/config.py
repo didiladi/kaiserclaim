@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     debug: bool = False
     secret_key: str = "change-me-in-production"
 
+    # IBAN to select on the Überweisungskonto step; leave empty to use the pre-selected account
+    merkur_bank_iban: str = ""
+
     # Set to True to skip real Merkur portal submission (for local testing)
     merkur_dry_run: bool = False
 

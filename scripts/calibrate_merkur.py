@@ -51,37 +51,60 @@ PROBES: dict[str, dict[str, list[str]]] = {
             "#password", "input[name=password]", "input[type=password]",
         ],
         "login_button": [
-            "button[type=submit]", "button:has-text('Anmelden')",
-            "button:has-text('Login')", "input[type=submit]",
+            "#btlogin", "button[type=submit]", "button:has-text('Anmelden')",
         ],
     },
     "submission_list": {
-        "new_submission": [
-            "text=Neue Einreichung",
-            "button:has-text('Neue Einreichung')",
+        # Confirmed: the real link text is "Einreichung starten", opens in new tab.
+        "einreichung_starten": [
+            'a[href="/kporclient/einreichung"]',
+            "a:has-text('Einreichung starten')",
             "a:has-text('Neue Einreichung')",
-            "button:has-text('Einreichung erstellen')",
-            "button:has-text('Neu')",
-            "[class*=btn]:has-text('Neu')",
         ],
     },
-    "submission_form": {
+    # The Angular SPA steps below probe the new tab (form_page).
+    "step1_person": {
+        "person_radio_group": [
+            'mat-radio-button[name="mat-radio-group-1"]',
+            'input[name="mat-radio-group-1"]',
+        ],
+        "weiter_button": [
+            "button.mat-stepper-next",
+            "button[matsteppernext]",
+            "button:has-text('WEITER')",
+        ],
+    },
+    "step2_iban": {
+        "iban_radio_group": [
+            'mat-radio-button[name="mat-radio-group-2"]',
+            'input[name="mat-radio-group-2"]',
+        ],
+        "weiter_button": [
+            "button.mat-stepper-next",
+            "button[matsteppernext]",
+            "button:has-text('WEITER')",
+        ],
+    },
+    "step3_upload": {
         "file_input": [
             "input[type=file]", "input[accept]",
         ],
         "file_trigger": [
-            "text=Datei hochladen", "button:has-text('hochladen')",
-            "label:has-text('hochladen')", "button:has-text('Datei')",
-            "label:has-text('Datei')", "[class*=upload]",
+            "button:has-text('hochladen')", "button:has-text('Datei')",
+            "label:has-text('hochladen')", "label:has-text('Datei')",
+            "[class*=upload]",
         ],
-        "amount": [
-            "input[name=amount]", "#amount", "input[id=amount]",
-            "input[placeholder*='Betrag']", "input[placeholder*='betrag']",
-            "input[placeholder*='€']", "input[type=number]",
+        "weiter_button": [
+            "button.mat-stepper-next",
+            "button[matsteppernext]",
+            "button:has-text('WEITER')",
         ],
-        "date": [
-            "input[name=date]", "input[type=date]", "#date",
-            "input[placeholder*='Datum']", "input[placeholder*='TT.MM']",
+    },
+    "step4_summary": {
+        "confirm_checkbox": [
+            "mat-checkbox input[type=checkbox]",
+            "input[type=checkbox]",
+            "[class*=confirm] input",
         ],
         "submit_button": [
             "button[type=submit]", "button:has-text('Einreichen')",
@@ -89,7 +112,7 @@ PROBES: dict[str, dict[str, list[str]]] = {
         ],
     },
     "confirmation": {
-        "success_text": [
+        "success_indicator": [
             "text=erfolgreich", "text=eingereicht", "[class*=success]",
             "[role=alert]", ".confirmation",
         ],
@@ -265,7 +288,7 @@ async def run(receipt_path: str | None) -> None:
         page = context.pages[0] if context.pages else await context.new_page()
 
         # ------------------------------------------------------------------
-        # Step 1: navigate and auto-login if needed
+        # Step 1: navigate to Liferay portal and auto-login if needed
         # ------------------------------------------------------------------
         print("Step 1: navigating to submission form…")
         await page.goto(FORM_URL, wait_until="networkidle")
@@ -274,62 +297,117 @@ async def run(receipt_path: str | None) -> None:
         print(f"  Landed at: {page.url}")
 
         await _ensure_logged_in(page)
-
-        # Dismiss cookie consent banner before the portlet renders
         await dismiss_cookie_banner(page)
 
-        # Wait for the Liferay/Vue portlet to render
-        print("  Waiting for Vue portlet to render…")
+        print("  Waiting for Liferay portlet to render…")
         await page.wait_for_load_state("networkidle")
         await page.wait_for_timeout(3_000)
         await dismiss_cookie_banner(page)
 
-        await snapshot(page, "02_submission_list")
-        await dump_live_elements(page, "02_submission_list")
-        sub_list_results = await probe_selectors(page, "submission_list")
-        print_probe_results("submission_list", sub_list_results)
+        await snapshot(page, "02_portal_dashboard")
+        await dump_live_elements(page, "02_portal_dashboard")
+        portal_results = await probe_selectors(page, "submission_list")
+        print_probe_results("submission_list (Liferay portal)", portal_results)
 
         # ------------------------------------------------------------------
-        # Step 2: click "Neue Einreichung"
+        # Step 2: click "Einreichung starten" → intercept new Angular tab
         # ------------------------------------------------------------------
-        print("Step 2: clicking 'Neue Einreichung'…")
-        new_sub_sel = sub_list_results.get("new_submission")
-        if new_sub_sel:
-            await page.locator(new_sub_sel).first.click()
-            print(f"  [click] Neue Einreichung via {new_sub_sel!r}")
+        print("Step 2: clicking 'Einreichung starten' (opens new tab)…")
+        einreichung_sel = portal_results.get("einreichung_starten")
+        if einreichung_sel:
+            async with context.expect_page() as new_page_info:
+                await page.locator(einreichung_sel).first.click()
+                print(f"  [click] Einreichung starten via {einreichung_sel!r}")
         else:
-            print("  'Neue Einreichung' not found — pausing.")
-            print("  Click it in the browser, then Resume.")
+            print("  'Einreichung starten' not found — pausing.")
+            print("  Click it in the browser (it opens a new tab), then Resume.")
             try:
-                await page.pause()
+                async with context.expect_page() as new_page_info:
+                    await page.pause()
             except Exception:
                 print("  Browser closed — exiting.")
+                await context.close()
                 return
 
-        await page.wait_for_load_state("networkidle")
-        await page.wait_for_timeout(3_000)
-        await dismiss_cookie_banner(page)
-        await snapshot(page, "03_submission_form")
-        await dump_live_elements(page, "03_submission_form")
-        form_results = await probe_selectors(page, "submission_form")
-        print_probe_results("submission_form", form_results)
+        form_page = await new_page_info.value
+        print(f"  New tab URL: {form_page.url}")
+        await form_page.wait_for_load_state("networkidle")
+
+        # Wait for Angular mat-stepper to bootstrap
+        print("  Waiting for Angular mat-stepper to render…")
+        try:
+            await form_page.wait_for_selector("app-root mat-stepper", timeout=30_000)
+            print("  mat-stepper found — Angular bootstrapped.")
+        except Exception:
+            print("  mat-stepper not found within 30 s — dumping DOM anyway.")
+
+        await snapshot(form_page, "03_step1_person")
+        await dump_live_elements(form_page, "03_step1_person")
+        step1_results = await probe_selectors(form_page, "step1_person")
+        print_probe_results("step1_person (Angular SPA)", step1_results)
 
         # ------------------------------------------------------------------
-        # Step 3: fill form (stop before submit)
+        # Step 3: Versicherte Person — show radio options
         # ------------------------------------------------------------------
-        print("Step 3: filling form (will NOT submit)…")
+        print("Step 3: probing Versicherte Person radio options…")
+        radio_labels = form_page.locator('mat-radio-button[name="mat-radio-group-1"] label')
+        count = await radio_labels.count()
+        print(f"  Found {count} person radio(s):")
+        for i in range(count):
+            txt = (await radio_labels.nth(i).inner_text()).strip()
+            print(f"    [{i}] {txt!r}")
+
+        # Select the first option for calibration purposes (no real claim).
+        if count > 0:
+            await radio_labels.first.click()
+            print("  [click] Selected first Versicherte Person for calibration.")
+
+        weiter_sel = step1_results.get("weiter_button") or "button.mat-stepper-next"
+        await form_page.locator(weiter_sel).first.click()
+        print(f"  [click] WEITER via {weiter_sel!r}")
+        await form_page.wait_for_timeout(1_000)
+
+        # ------------------------------------------------------------------
+        # Step 4: Überweisungskonto
+        # ------------------------------------------------------------------
+        print("Step 4: probing Überweisungskonto radio options…")
+        await snapshot(form_page, "04_step2_iban")
+        await dump_live_elements(form_page, "04_step2_iban")
+        step2_results = await probe_selectors(form_page, "step2_iban")
+        print_probe_results("step2_iban (Angular SPA)", step2_results)
+
+        iban_inputs = form_page.locator('input[name="mat-radio-group-2"]')
+        iban_count = await iban_inputs.count()
+        print(f"  Found {iban_count} IBAN radio(s):")
+        for i in range(iban_count):
+            val = await iban_inputs.nth(i).get_attribute("value") or ""
+            checked = await iban_inputs.nth(i).is_checked()
+            print(f"    [{i}] value={val!r}  checked={checked}")
+
+        weiter2_sel = step2_results.get("weiter_button") or "button.mat-stepper-next"
+        await form_page.locator(weiter2_sel).first.click()
+        print(f"  [click] WEITER via {weiter2_sel!r}")
+        await form_page.wait_for_timeout(1_000)
+
+        # ------------------------------------------------------------------
+        # Step 5: File upload
+        # ------------------------------------------------------------------
+        print("Step 5: probing file upload step…")
+        await snapshot(form_page, "05_step3_upload")
+        await dump_live_elements(form_page, "05_step3_upload")
+        step3_results = await probe_selectors(form_page, "step3_upload")
+        print_probe_results("step3_upload (Angular SPA)", step3_results)
 
         if receipt_path:
-            file_trigger_candidates = PROBES["submission_form"]["file_trigger"]
-            file_input_sel = form_results.get("file_input") or "input[type=file]"
+            file_trigger_candidates = PROBES["step3_upload"]["file_trigger"]
             try:
-                await page.wait_for_selector(file_input_sel, timeout=5_000)
-                async with page.expect_file_chooser(timeout=5_000) as fc_info:
+                await form_page.wait_for_selector("input[type=file]", timeout=5_000)
+                async with form_page.expect_file_chooser(timeout=5_000) as fc_info:
                     found = False
                     for sel in file_trigger_candidates:
                         try:
-                            if await page.locator(sel).count() >= 1:
-                                await page.locator(sel).first.click()
+                            if await form_page.locator(sel).count() >= 1:
+                                await form_page.locator(sel).first.click()
                                 found = True
                                 print(f"  [click] file trigger via {sel!r}")
                                 break
@@ -338,40 +416,52 @@ async def run(receipt_path: str | None) -> None:
                     if not found:
                         print("  File trigger not found — pausing to pick manually.")
                         try:
-                            await page.pause()
+                            await form_page.pause()
                         except Exception:
                             print("  Browser closed — exiting.")
+                            await context.close()
                             return
                 fc = await fc_info.value
                 await fc.set_files(receipt_path)
                 print(f"  [file] set to {receipt_path}")
+                await form_page.wait_for_timeout(1_000)
             except Exception as e:
                 print(f"  File upload failed ({e}) — skipping.")
         else:
-            print("  No --receipt — skipping file upload.")
+            print("  No --receipt — skipping file upload; WEITER will likely be disabled.")
 
-        amount_sel = form_results.get("amount") or "input[name=amount]"
-        date_sel = form_results.get("date") or "input[name=date]"
-        for sel, value, label in [
-            (amount_sel, "12.34", "amount"),
-            (date_sel, "01.01.2025", "date"),
-        ]:
-            try:
-                if await page.locator(sel).count():
-                    await page.fill(sel, value)
-                    print(f"  [fill] {label} ({sel}) = {value}")
-            except Exception as e:
-                print(f"  {label} fill failed: {e}")
+        weiter3_sel = step3_results.get("weiter_button") or "button.mat-stepper-next"
+        try:
+            btn3 = form_page.locator(weiter3_sel).first
+            if await btn3.is_enabled():
+                await btn3.click()
+                print(f"  [click] WEITER via {weiter3_sel!r}")
+                await form_page.wait_for_timeout(1_000)
+            else:
+                print("  WEITER disabled (no file uploaded) — skipping step 5 WEITER.")
+        except Exception as e:
+            print(f"  Step 5 WEITER failed: {e}")
 
-        await snapshot(page, "04_form_filled")
-        print("\n  *** STOPPED BEFORE SUBMIT — no claim was filed ***\n")
+        # ------------------------------------------------------------------
+        # Step 6: Zusammenfassung / confirmation checkbox
+        # ------------------------------------------------------------------
+        print("Step 6: probing Zusammenfassung (confirmation) step…")
+        await snapshot(form_page, "06_step4_summary")
+        await dump_live_elements(form_page, "06_step4_summary")
+        step4_results = await probe_selectors(form_page, "step4_summary")
+        print_probe_results("step4_summary (Angular SPA)", step4_results)
+
+        print("\n  *** STOPPED BEFORE FINAL SUBMIT — no claim was filed ***\n")
 
         # ------------------------------------------------------------------
         # Summary
         # ------------------------------------------------------------------
         all_results = {
-            "submission_list": sub_list_results,
-            "submission_form": form_results,
+            "portal_dashboard / submission_list": portal_results,
+            "step1_person": step1_results,
+            "step2_iban": step2_results,
+            "step3_upload": step3_results,
+            "step4_summary": step4_results,
         }
 
         print("=" * 62)
@@ -382,9 +472,9 @@ async def run(receipt_path: str | None) -> None:
         for stage, r in all_results.items():
             for field, sel in r.items():
                 if sel:
-                    print(f"  OK   {stage}.{field:<35} {sel}")
+                    print(f"  OK   {stage}.{field:<40} {sel}")
                 else:
-                    print(f"  MISS {stage}.{field:<35} check *_elements.json")
+                    print(f"  MISS {stage}.{field:<40} check *_elements.json")
                     any_miss = True
 
         print(f"\nHTML snapshots : {CAPTURE_DIR}/*.html")
@@ -401,7 +491,7 @@ async def run(receipt_path: str | None) -> None:
 
         print("Pausing before close — inspect the browser, then click Resume.")
         try:
-            await page.pause()
+            await form_page.pause()
         except Exception:
             pass
         await context.close()

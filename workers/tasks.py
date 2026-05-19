@@ -143,6 +143,7 @@ def submit_to_merkur(self, invoice_id: str) -> dict:
                 invoice_pdf=invoice.file_path,
                 amount=invoice.amount or 0.0,
                 date=date_str,
+                patient_name=invoice.patient_name or "",
             ))
             if not success:
                 raise RuntimeError("Merkur submission did not return a success signal")
