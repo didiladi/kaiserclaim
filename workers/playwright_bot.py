@@ -179,21 +179,22 @@ class MerkurBot:
                     f"Merkur: '{patient_name}' not found in Versicherte Person list. "
                     f"Available: {names}"
                 )
-            # force=True bypasses Playwright's visibility check on Angular Material
-            # custom elements, which have non-zero size but report as not visible.
-            await person_btn.first.click(force=True)
+            # Click the inner <label> — the visible element Angular wires to the
+            # form control. Clicking the mat-radio-button wrapper (even with force)
+            # doesn't trigger Angular's reactive-form change detection.
+            await person_btn.first.locator("label").click()
         await self._weiter(form_page)
 
         # ── Step 2: Überweisungskonto ───────────────────────────────────────────
         # mat-radio-group-2; value = IBAN without spaces. First option pre-selected.
         target_iban = settings.merkur_bank_iban.replace(" ", "")
         if target_iban:
-            iban_radio = form_page.locator(
-                f'input[name="mat-radio-group-2"][value="{target_iban}"]'
+            iban_btn = form_page.locator(
+                f"mat-radio-button:has(input[name='mat-radio-group-2'][value='{target_iban}'])"
             )
-            if await iban_radio.count() == 0:
+            if await iban_btn.count() == 0:
                 raise RuntimeError(f"Merkur: IBAN '{target_iban}' not found")
-            await iban_radio.click(force=True)
+            await iban_btn.locator("label").click()
         await self._weiter(form_page)
 
         # ── Step 3: Dateiauswahl ────────────────────────────────────────────────
@@ -203,10 +204,10 @@ class MerkurBot:
         await self._weiter(form_page)
 
         # ── Step 4: Zusammenfassung ─────────────────────────────────────────────
-        # Confirmed checkbox: #mat-mdc-checkbox-0-input
-        chk = form_page.locator("#mat-mdc-checkbox-0-input")
-        if not await chk.is_checked():
-            await chk.click(force=True)
+        # Click the mat-checkbox label to trigger Angular's change detection.
+        chk_input = form_page.locator("#mat-mdc-checkbox-0-input")
+        if not await chk_input.is_checked():
+            await form_page.locator("mat-checkbox label").click()
 
         if stop_before_submit:
             return False
