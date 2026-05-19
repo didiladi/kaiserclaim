@@ -179,7 +179,9 @@ class MerkurBot:
                     f"Merkur: '{patient_name}' not found in Versicherte Person list. "
                     f"Available: {names}"
                 )
-            await person_btn.first.click()
+            # force=True bypasses Playwright's visibility check on Angular Material
+            # custom elements, which have non-zero size but report as not visible.
+            await person_btn.first.click(force=True)
         await self._weiter(form_page)
 
         # ── Step 2: Überweisungskonto ───────────────────────────────────────────
@@ -191,7 +193,7 @@ class MerkurBot:
             )
             if await iban_radio.count() == 0:
                 raise RuntimeError(f"Merkur: IBAN '{target_iban}' not found")
-            await iban_radio.click()
+            await iban_radio.click(force=True)
         await self._weiter(form_page)
 
         # ── Step 3: Dateiauswahl ────────────────────────────────────────────────
@@ -204,7 +206,7 @@ class MerkurBot:
         # Confirmed checkbox: #mat-mdc-checkbox-0-input
         chk = form_page.locator("#mat-mdc-checkbox-0-input")
         if not await chk.is_checked():
-            await chk.click()
+            await chk.click(force=True)
 
         if stop_before_submit:
             return False
