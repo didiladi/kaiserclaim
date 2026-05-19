@@ -219,19 +219,23 @@ async def dump_live_elements(page: Page, label: str) -> None:
     print(f"  [elements] {dest}")
 
 
-async def _ensure_logged_in(page: Page) -> None:
-    """Auto-login using confirmed selectors (#username, #password, #btlogin)."""
+async def _ensure_logged_in(page: Page, *, fallback_url: str | None = None) -> None:
+    """Auto-login using confirmed selectors (#username, #password, #btlogin).
+
+    After login the portal redirects via the 'goto' param embedded in loginapp.html.
+    Pass fallback_url only when the redirect is not guaranteed to land in the right place.
+    """
     from core.config import get_settings
     settings = get_settings()
 
-    on_login_url = "login" in page.url.lower() or "loginapp" in page.url.lower()
+    on_login_url = "loginapp" in page.url.lower() or "login" in page.url.lower()
     has_login_form = await page.locator("#btlogin").count() > 0
 
     if not on_login_url and not has_login_form:
         print("  Session active — skipping login.")
         return
 
-    print("  Login form detected — attempting auto-login…")
+    print(f"  Login form detected at {page.url} — attempting auto-login…")
 
     # The Anmelden toggle may need to be clicked to reveal the form
     toggle = page.locator("#bt_login")
@@ -260,10 +264,10 @@ async def _ensure_logged_in(page: Page) -> None:
             except Exception:
                 return
 
-    # If the login redirected away from the form, navigate back
-    if "leistungseinreichung" not in page.url:
-        print(f"  Navigating back to form from {page.url}…")
-        await page.goto(FORM_URL, wait_until="networkidle")
+    # Only fall back to fallback_url if still on a login page (goto redirect didn't fire).
+    if fallback_url and "loginapp" in page.url.lower():
+        print(f"  Redirect did not fire — navigating to {fallback_url}…")
+        await page.goto(fallback_url, wait_until="networkidle")
         await dismiss_cookie_banner(page)
         await page.wait_for_timeout(2_000)
         print(f"  Now at: {page.url}")
@@ -296,7 +300,7 @@ async def run(receipt_path: str | None) -> None:
         await page.wait_for_timeout(1_000)
         print(f"  Landed at: {page.url}")
 
-        await _ensure_logged_in(page)
+        await _ensure_logged_in(page, fallback_url=FORM_URL)
         await dismiss_cookie_banner(page)
 
         print("  Waiting for Liferay portlet to render…")
@@ -332,6 +336,13 @@ async def run(receipt_path: str | None) -> None:
         form_page = await new_page_info.value
         print(f"  New tab URL: {form_page.url}")
         await form_page.wait_for_load_state("networkidle")
+
+        # The Angular SPA has its own session — the Liferay cookie does not carry over.
+        # Login here if the new tab landed on loginapp.html.
+        await dismiss_cookie_banner(form_page)
+        await _ensure_logged_in(form_page, fallback_url="https://portal.merkur.at/kporclient/einreichung")
+        await form_page.wait_for_load_state("networkidle")
+        print(f"  After login — form tab URL: {form_page.url}")
 
         # Wait for Angular mat-stepper to bootstrap
         print("  Waiting for Angular mat-stepper to render…")

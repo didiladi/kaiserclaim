@@ -62,11 +62,17 @@ class MerkurBot:
             except Exception:
                 continue
 
-    async def _ensure_logged_in(self, page: Page) -> None:
-        """Login via the Liferay portlet if the session has expired."""
+    async def _ensure_logged_in(self, page: Page, *, fallback_url: str | None = None) -> None:
+        """Login via the portal if the session has expired.
+
+        After login the portal redirects via the embedded 'goto' param.
+        If it still ends up on an unrelated page, navigate to fallback_url when given.
+        """
+        if not settings.merkur_username:
+            raise RuntimeError("Merkur login failed: MERKUR_USERNAME is not set")
         _needs_login = (
-            "login" in page.url.lower()
-            or "loginapp" in page.url.lower()
+            "loginapp" in page.url.lower()
+            or "login" in page.url.lower()
             or await page.locator("#btlogin").count() > 0
         )
         if not _needs_login:
@@ -80,12 +86,10 @@ class MerkurBot:
         await page.click("#btlogin")
         await page.wait_for_load_state("networkidle")
         await page.wait_for_timeout(2_000)
-        if "leistungseinreichung" not in page.url:
-            await page.goto(_MERKUR_FORM_URL, wait_until="networkidle")
-        if not settings.merkur_username:
-            raise RuntimeError("Merkur login failed: MERKUR_USERNAME is not set")
         if await page.locator("#btlogin").count() > 0:
             raise RuntimeError("Merkur login failed: still on login page after submit")
+        if fallback_url and "loginapp" in page.url.lower():
+            await page.goto(fallback_url, wait_until="networkidle")
 
     async def _submit(
         self,
@@ -100,7 +104,7 @@ class MerkurBot:
         # Land on the Liferay portal page that hosts the "Einreichung starten" link.
         await page.goto(_MERKUR_FORM_URL, wait_until="networkidle")
         await self._dismiss_cookie_banner(page)
-        await self._ensure_logged_in(page)
+        await self._ensure_logged_in(page, fallback_url=_MERKUR_FORM_URL)
 
         # Wait for the Liferay portlet to finish rendering.
         await page.wait_for_timeout(3_000)
@@ -111,6 +115,13 @@ class MerkurBot:
         async with context.expect_page() as new_page_info:
             await page.locator('a[href="/kporclient/einreichung"]').first.click()
         form_page = await new_page_info.value
+        await form_page.wait_for_load_state("networkidle")
+
+        # The Angular SPA has its own session — the Liferay cookie does not carry over.
+        # After clicking the link the new tab lands on loginapp.html; login there too.
+        await self._dismiss_cookie_banner(form_page)
+        # The goto param in loginapp.html redirects back to /kporclient/einreichung automatically.
+        await self._ensure_logged_in(form_page, fallback_url="https://portal.merkur.at/kporclient/einreichung")
         await form_page.wait_for_load_state("networkidle")
 
         # Wait for Angular to bootstrap — the loading spinner disappears from app-root.
