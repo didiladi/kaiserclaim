@@ -141,27 +141,48 @@ class MerkurBot:
             fallback_url="https://portal.merkur.at/kporclient/einreichung",
         )
         await form_page.wait_for_load_state("networkidle")
-        await form_page.wait_for_selector("app-root mat-stepper", timeout=30_000)
+        # Wait for Angular to bootstrap. Use mat-step-header (confirmed in calibration DOM
+        # dumps) rather than mat-stepper which may not be the outer element tag.
+        try:
+            await form_page.wait_for_selector("mat-step-header", timeout=30_000)
+        except Exception:
+            raise RuntimeError(
+                f"Merkur: Angular SPA did not render within 30 s "
+                f"(tab URL: {form_page.url})"
+            )
 
         # ── Step 0: Vertrag ─────────────────────────────────────────────────────
         # One radio (mat-radio-group-0), already pre-selected. Just advance.
         await self._weiter(form_page, 0)
+        # Wait for the Person step to become active before reading radio labels.
+        await form_page.wait_for_selector(
+            "mat-step-header[id='cdk-stepper-0-label-1']", timeout=10_000
+        )
 
         # ── Step 1: Versicherte Person ──────────────────────────────────────────
-        # mat-radio-group-1; innerText of mat-radio-button contains "Name (DOB)".
+        # mat-radio-group-1; labels visible when step is active.
+        # Use Playwright's filter(has_text=) — more reliable than reading innerText.
         if patient_name:
-            buttons = form_page.locator("mat-radio-button:has(input[name='mat-radio-group-1'])")
-            count = await buttons.count()
-            matched = False
-            for i in range(count):
-                if patient_name.lower() in (await buttons.nth(i).inner_text()).lower():
-                    await buttons.nth(i).click()
-                    matched = True
-                    break
-            if not matched:
-                raise RuntimeError(
-                    f"Merkur: '{patient_name}' not found in Versicherte Person list"
+            person_btn = (
+                form_page
+                .locator("mat-radio-button")
+                .filter(has=form_page.locator("input[name='mat-radio-group-1']"))
+                .filter(has_text=patient_name)
+            )
+            if await person_btn.count() == 0:
+                # Collect all available names for a useful error message.
+                all_btns = form_page.locator("mat-radio-button").filter(
+                    has=form_page.locator("input[name='mat-radio-group-1']")
                 )
+                names = [
+                    (await all_btns.nth(i).inner_text()).strip()
+                    for i in range(await all_btns.count())
+                ]
+                raise RuntimeError(
+                    f"Merkur: '{patient_name}' not found in Versicherte Person list. "
+                    f"Available: {names}"
+                )
+            await person_btn.first.click()
         await self._weiter(form_page, 1)
 
         # ── Step 2: Überweisungskonto ───────────────────────────────────────────
