@@ -140,6 +140,14 @@ async def run() -> None:
             "If you see a login form: fill in your credentials and log in.\n"
             "  If you're already logged in: just click Resume.",
         )
+        # Wait for the Liferay Vue portlet to inject the "Einreichung starten" link
+        # before snapshotting — without this the link is absent from page.content().
+        try:
+            await page.wait_for_selector(
+                'a[href="/kporclient/einreichung"]', timeout=10_000
+            )
+        except Exception:
+            print("  Warning: portlet link not found within 10 s — snapshot may be incomplete.")
         await snapshot(page, "01_portal_dashboard")
         await dump_elements(page, "01_portal_dashboard")
 

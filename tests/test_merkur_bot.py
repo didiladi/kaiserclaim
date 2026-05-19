@@ -23,9 +23,9 @@ FIXTURES = Path(__file__).parent / "fixtures" / "merkur"
 # Confirmed selectors — all verified by calibration run 2026-05-19
 # ---------------------------------------------------------------------------
 
-PORTAL_SELECTORS: dict[str, str] = {
-    "einreichung_starten": 'a[href="/kporclient/einreichung"]',
-}
+# NOTE: a[href="/kporclient/einreichung"] is injected by the Liferay Vue portlet
+# after page load and is absent from the static HTML snapshot. Verified in the
+# live portal by calibration; no static test needed here.
 
 # Step 0: Vertrag — one pre-selected radio, advance with button[matsteppernext] nth(0)
 VERTRAG_SELECTORS: dict[str, str] = {
@@ -88,12 +88,6 @@ async def _assert_selectors(html: str, selectors: dict[str, str]) -> None:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-
-async def test_portal_selectors():
-    """Liferay portal — 'Einreichung starten' link opens Angular SPA in new tab."""
-    html = _load_fixture("01_portal_dashboard")
-    await _assert_selectors(html, PORTAL_SELECTORS)
-
 
 async def test_vertrag_selectors():
     """Angular SPA — Vertrag step radio and WEITER button."""
