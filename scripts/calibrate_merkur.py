@@ -251,11 +251,25 @@ async def _ensure_logged_in(page: Page, *, fallback_url: str | None = None) -> N
             return
     else:
         try:
-            await page.fill("#username", settings.merkur_username)
-            await page.fill("#password", settings.merkur_password)
+            # Angular reactive forms need press_sequentially (fires keydown/input/keyup)
+            # rather than fill() which may not trigger ngModel change detection.
+            username_input = page.locator("#username")
+            await username_input.click()
+            await username_input.press_sequentially(settings.merkur_username, delay=50)
+            password_input = page.locator("#password")
+            await password_input.click()
+            await password_input.press_sequentially(settings.merkur_password, delay=50)
+            await page.wait_for_timeout(300)
             await page.click("#btlogin")
+            # Wait for Angular router to leave the INIT state (URL fragment changes on success).
+            try:
+                await page.wait_for_url(
+                    lambda url: "login/INIT" not in url,
+                    timeout=10_000,
+                )
+            except Exception:
+                pass
             await page.wait_for_load_state("networkidle")
-            await page.wait_for_timeout(2_000)
             print(f"  Auto-login done — now at: {page.url}")
         except Exception as e:
             print(f"  Auto-login failed ({e}) — pausing for manual login.")
@@ -264,9 +278,16 @@ async def _ensure_logged_in(page: Page, *, fallback_url: str | None = None) -> N
             except Exception:
                 return
 
-    # Only fall back to fallback_url if still on a login page (goto redirect didn't fire).
+    # If still on loginapp after all that, pause for the user to intervene.
+    if "loginapp" in page.url.lower():
+        print("  Login did not succeed — pausing for manual login. Click Resume when done.")
+        try:
+            await page.pause()
+        except Exception:
+            return
+
     if fallback_url and "loginapp" in page.url.lower():
-        print(f"  Redirect did not fire — navigating to {fallback_url}…")
+        print(f"  Still on login page — navigating directly to {fallback_url}…")
         await page.goto(fallback_url, wait_until="networkidle")
         await dismiss_cookie_banner(page)
         await page.wait_for_timeout(2_000)

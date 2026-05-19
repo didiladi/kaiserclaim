@@ -81,12 +81,21 @@ class MerkurBot:
         if await _toggle.count() > 0 and await page.locator("#username").count() == 0:
             await _toggle.click()
             await page.wait_for_timeout(800)
-        await page.fill("#username", settings.merkur_username)
-        await page.fill("#password", settings.merkur_password)
+        # Angular reactive forms require press_sequentially to trigger ngModel change detection.
+        username_input = page.locator("#username")
+        await username_input.click()
+        await username_input.press_sequentially(settings.merkur_username, delay=50)
+        password_input = page.locator("#password")
+        await password_input.click()
+        await password_input.press_sequentially(settings.merkur_password, delay=50)
+        await page.wait_for_timeout(300)
         await page.click("#btlogin")
+        try:
+            await page.wait_for_url(lambda url: "login/INIT" not in url, timeout=10_000)
+        except Exception:
+            pass
         await page.wait_for_load_state("networkidle")
-        await page.wait_for_timeout(2_000)
-        if await page.locator("#btlogin").count() > 0:
+        if await page.locator("#btlogin").count() > 0 or "login/INIT" in page.url:
             raise RuntimeError("Merkur login failed: still on login page after submit")
         if fallback_url and "loginapp" in page.url.lower():
             await page.goto(fallback_url, wait_until="networkidle")
