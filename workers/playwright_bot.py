@@ -100,14 +100,14 @@ class MerkurBot:
         if fallback_url and "loginapp" in page.url.lower():
             await page.goto(fallback_url, wait_until="networkidle")
 
-    async def _weiter(self, page: Page, step_idx: int) -> None:
-        """Click the WEITER button for the given step index (0-based).
+    async def _weiter(self, page: Page) -> None:
+        """Click the currently visible WEITER button.
 
-        All button[matsteppernext] elements are present in the DOM at once
-        (Angular renders every step's content simultaneously). nth(step_idx)
-        selects the WEITER for the correct step.
+        All button[matsteppernext] elements are rendered in the DOM simultaneously
+        but only the active step's button is visible. :visible filters to the one
+        that can actually be clicked.
         """
-        await page.locator("button[matsteppernext]").nth(step_idx).click()
+        await page.locator("button[matsteppernext]:visible").click()
         await page.wait_for_timeout(800)
 
     async def _submit(
@@ -152,16 +152,14 @@ class MerkurBot:
             )
 
         # ── Step 0: Vertrag ─────────────────────────────────────────────────────
-        # One radio (mat-radio-group-0), already pre-selected. Just advance.
-        await self._weiter(form_page, 0)
-        # Wait for the Person step to become active before reading radio labels.
-        await form_page.wait_for_selector(
-            "mat-step-header[id='cdk-stepper-0-label-1']", timeout=10_000
-        )
+        # Single pre-selected radio. The form may auto-advance past this step on
+        # load; only click WEITER if it is currently visible.
+        if await form_page.locator("button[matsteppernext]:visible").count() > 0:
+            await self._weiter(form_page)
 
         # ── Step 1: Versicherte Person ──────────────────────────────────────────
-        # mat-radio-group-1; labels visible when step is active.
-        # Use Playwright's filter(has_text=) — more reliable than reading innerText.
+        # Wait for the Person step to be active, then select by name.
+        await form_page.wait_for_selector("mat-step-header#cdk-stepper-0-label-1", timeout=10_000)
         if patient_name:
             person_btn = (
                 form_page
@@ -170,7 +168,6 @@ class MerkurBot:
                 .filter(has_text=patient_name)
             )
             if await person_btn.count() == 0:
-                # Collect all available names for a useful error message.
                 all_btns = form_page.locator("mat-radio-button").filter(
                     has=form_page.locator("input[name='mat-radio-group-1']")
                 )
@@ -183,7 +180,7 @@ class MerkurBot:
                     f"Available: {names}"
                 )
             await person_btn.first.click()
-        await self._weiter(form_page, 1)
+        await self._weiter(form_page)
 
         # ── Step 2: Überweisungskonto ───────────────────────────────────────────
         # mat-radio-group-2; value = IBAN without spaces. First option pre-selected.
@@ -195,13 +192,13 @@ class MerkurBot:
             if await iban_radio.count() == 0:
                 raise RuntimeError(f"Merkur: IBAN '{target_iban}' not found")
             await iban_radio.click()
-        await self._weiter(form_page, 2)
+        await self._weiter(form_page)
 
         # ── Step 3: Dateiauswahl ────────────────────────────────────────────────
         # The file input is hidden (0x0); set_input_files works on hidden inputs.
         await form_page.locator("input[type=file]").set_input_files(invoice_pdf)
         await form_page.wait_for_timeout(1_000)
-        await self._weiter(form_page, 3)
+        await self._weiter(form_page)
 
         # ── Step 4: Zusammenfassung ─────────────────────────────────────────────
         # Confirmed checkbox: #mat-mdc-checkbox-0-input
