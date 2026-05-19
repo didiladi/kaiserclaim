@@ -100,6 +100,16 @@ class MerkurBot:
         if fallback_url and "loginapp" in page.url.lower():
             await page.goto(fallback_url, wait_until="networkidle")
 
+    async def _weiter(self, page: Page, step_idx: int) -> None:
+        """Click the WEITER button for the given step index (0-based).
+
+        All button[matsteppernext] elements are present in the DOM at once
+        (Angular renders every step's content simultaneously). nth(step_idx)
+        selects the WEITER for the correct step.
+        """
+        await page.locator("button[matsteppernext]").nth(step_idx).click()
+        await page.wait_for_timeout(800)
+
     async def _submit(
         self,
         context: BrowserContext,
@@ -110,120 +120,84 @@ class MerkurBot:
         patient_name: str = "",
         stop_before_submit: bool = False,
     ) -> bool:
-        # Land on the Liferay portal page that hosts the "Einreichung starten" link.
+        # ── Land on Liferay portal ──────────────────────────────────────────────
         await page.goto(_MERKUR_FORM_URL, wait_until="networkidle")
         await self._dismiss_cookie_banner(page)
         await self._ensure_logged_in(page, fallback_url=_MERKUR_FORM_URL)
-
-        # Wait for the Liferay portlet to finish rendering.
         await page.wait_for_timeout(3_000)
         await self._dismiss_cookie_banner(page)
 
-        # "Einreichung starten" opens the Angular SPA in a new tab (target="_blank").
-        # Confirmed selector: a[href="/kporclient/einreichung"]
+        # ── Open Angular SPA in new tab ─────────────────────────────────────────
+        # Confirmed: a[href="/kporclient/einreichung"] opens with target="_blank".
         async with context.expect_page() as new_page_info:
             await page.locator('a[href="/kporclient/einreichung"]').first.click()
         form_page = await new_page_info.value
         await form_page.wait_for_load_state("networkidle")
 
-        # The Angular SPA has its own session — the Liferay cookie does not carry over.
-        # After clicking the link the new tab lands on loginapp.html; login there too.
+        # The Angular SPA keeps its own session separate from Liferay.
         await self._dismiss_cookie_banner(form_page)
-        # The goto param in loginapp.html redirects back to /kporclient/einreichung automatically.
-        await self._ensure_logged_in(form_page, fallback_url="https://portal.merkur.at/kporclient/einreichung")
+        await self._ensure_logged_in(
+            form_page,
+            fallback_url="https://portal.merkur.at/kporclient/einreichung",
+        )
         await form_page.wait_for_load_state("networkidle")
-
-        # Wait for Angular to bootstrap — the loading spinner disappears from app-root.
         await form_page.wait_for_selector("app-root mat-stepper", timeout=30_000)
 
+        # ── Step 0: Vertrag ─────────────────────────────────────────────────────
+        # One radio (mat-radio-group-0), already pre-selected. Just advance.
+        await self._weiter(form_page, 0)
+
         # ── Step 1: Versicherte Person ──────────────────────────────────────────
-        # Confirmed: name="mat-radio-group-1"; label text contains patient name + DOB.
-        # If patient_name is given, select the matching radio; otherwise use pre-checked.
+        # mat-radio-group-1; innerText of mat-radio-button contains "Name (DOB)".
         if patient_name:
-            radio_labels = form_page.locator('mat-radio-button[name="mat-radio-group-1"] label')
-            count = await radio_labels.count()
+            buttons = form_page.locator("mat-radio-button:has(input[name='mat-radio-group-1'])")
+            count = await buttons.count()
             matched = False
             for i in range(count):
-                label_text = (await radio_labels.nth(i).inner_text()).strip()
-                if patient_name.lower() in label_text.lower():
-                    await radio_labels.nth(i).click()
+                if patient_name.lower() in (await buttons.nth(i).inner_text()).lower():
+                    await buttons.nth(i).click()
                     matched = True
                     break
             if not matched:
                 raise RuntimeError(
-                    f"Merkur: Versicherte Person '{patient_name}' not found in radio list"
+                    f"Merkur: '{patient_name}' not found in Versicherte Person list"
                 )
-
-        await form_page.locator("button.mat-stepper-next").first.click()
-        await form_page.wait_for_timeout(800)
+        await self._weiter(form_page, 1)
 
         # ── Step 2: Überweisungskonto ───────────────────────────────────────────
-        # Confirmed: name="mat-radio-group-2"; value is IBAN without spaces.
-        # If merkur_bank_iban is set, select it; otherwise the pre-selected account is used.
+        # mat-radio-group-2; value = IBAN without spaces. First option pre-selected.
         target_iban = settings.merkur_bank_iban.replace(" ", "")
         if target_iban:
             iban_radio = form_page.locator(
                 f'input[name="mat-radio-group-2"][value="{target_iban}"]'
             )
             if await iban_radio.count() == 0:
-                raise RuntimeError(
-                    f"Merkur: IBAN '{target_iban}' not found in Überweisungskonto list"
-                )
+                raise RuntimeError(f"Merkur: IBAN '{target_iban}' not found")
             await iban_radio.click()
+        await self._weiter(form_page, 2)
 
-        await form_page.locator("button.mat-stepper-next").first.click()
-        await form_page.wait_for_timeout(800)
-
-        # ── Step 3: File upload ─────────────────────────────────────────────────
-        # TODO: replace with confirmed selector after calibration of this step.
-        await form_page.wait_for_selector("input[type=file]", timeout=10_000)
-        async with form_page.expect_file_chooser() as fc_info:
-            # Try known Angular upload trigger patterns; fall back to direct input.
-            for _trigger in [
-                "button:has-text('hochladen')", "button:has-text('Datei')",
-                "label:has-text('hochladen')", "[class*=upload]",
-            ]:
-                try:
-                    if await form_page.locator(_trigger).count() > 0:
-                        await form_page.locator(_trigger).first.click()
-                        break
-                except Exception:
-                    continue
-            else:
-                await form_page.locator("input[type=file]").first.click()
-        file_chooser = await fc_info.value
-        await file_chooser.set_files(invoice_pdf)
+        # ── Step 3: Dateiauswahl ────────────────────────────────────────────────
+        # The file input is hidden (0x0); set_input_files works on hidden inputs.
+        await form_page.locator("input[type=file]").set_input_files(invoice_pdf)
         await form_page.wait_for_timeout(1_000)
+        await self._weiter(form_page, 3)
 
-        await form_page.locator("button.mat-stepper-next").first.click()
-        await form_page.wait_for_timeout(800)
-
-        # ── Step 4: Zusammenfassung — confirmation checkbox ─────────────────────
-        # TODO: replace with confirmed selector after calibration.
-        for _chk_sel in [
-            "mat-checkbox input[type=checkbox]",
-            "input[type=checkbox]",
-            "[class*=confirm] input",
-        ]:
-            try:
-                chk = form_page.locator(_chk_sel)
-                if await chk.count() > 0 and not await chk.first.is_checked():
-                    await chk.first.click()
-                    break
-            except Exception:
-                continue
+        # ── Step 4: Zusammenfassung ─────────────────────────────────────────────
+        # Confirmed checkbox: #mat-mdc-checkbox-0-input
+        chk = form_page.locator("#mat-mdc-checkbox-0-input")
+        if not await chk.is_checked():
+            await chk.click()
 
         if stop_before_submit:
             return False
 
-        # ── Step 5: Final submit ────────────────────────────────────────────────
-        # TODO: replace with confirmed submit-button selector after calibration.
-        await form_page.locator("button[type=submit]").last.click()
-        await form_page.wait_for_load_state("networkidle")
+        # ── Submit ──────────────────────────────────────────────────────────────
+        # Confirmed button text: 'EINREICHUNG ABSCHLIESSEN'
+        await form_page.get_by_role("button", name="EINREICHUNG ABSCHLIESSEN").click()
+        await form_page.wait_for_load_state("networkidle", timeout=60_000)
 
-        # TODO: replace with confirmed success element after calibration.
         body = (await form_page.text_content("body") or "").lower()
-        return "erfolgreich" in body or "eingereicht" in body
+        return "erfolgreich" in body or "eingereicht" in body or "hochladen" in body
 
 
 # ---------------------------------------------------------------------------
