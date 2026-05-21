@@ -20,7 +20,7 @@ Replaces the tedious two-step ÖGK → Merkur reimbursement process with a fully
 - [x] Pharmacy receipt regex parser — date, total amount, ATU number extraction
 - [x] Gemini contract auditor — parses unstructured PDF text into structured `BenefitRule` rows
 - [x] Celery task workers — `run_ocr`, `submit_to_merkur`, `submit_to_oegk`, `poll_oegk_refund`
-- [x] Playwright bots — `MerkurBot` (headless) and `OegkBot` (persistent context for ID-Austria 2FA)
+- [x] Playwright bots — `MerkurBot` (headless, calibrated against live Merkur portal) and `OegkBot` (persistent context for ID-Austria 2FA)
 - [x] REST API — invoice CRUD, contract upload + parse, live benefit quota dashboard endpoint
 - [x] Docker Compose local dev stack (Postgres, Redis, API, Worker, auto-migration)
 - [x] Kubernetes manifests — Namespace, Secret, PVC, migrate Job, API + Worker Deployments, Traefik IngressRoute, Kustomize overlays
@@ -31,8 +31,7 @@ Replaces the tedious two-step ÖGK → Merkur reimbursement process with a fully
 - [ ] **Auth** — JWT middleware replacing the current `user_id` stub in `api/dependencies.py`
 - [ ] **File watcher** — inotify/watchdog service to auto-ingest invoices dropped on the NAS
 - [ ] **ÖGK full path** — end-to-end test of the `READY_FOR_OEGK → OEGK_REFUNDED` flow
-- [ ] **Merkur Playwright selectors** — portal CSS selectors need to be mapped against the live Merkur portal
-- [ ] **ÖGK Playwright selectors** — same for the ÖGK portal
+- [ ] **ÖGK Playwright selectors** — portal selectors need to be mapped against the live ÖGK portal
 - [ ] **Dashboard / frontend** — UI for the Auditor quota view (currently API-only)
 - [ ] **Multi-insurance support** — ÖGK + additional private insurers beyond Merkur
 - [ ] **Quota reset scheduling** — automatic `reset_date` computation for `BIANNUAL` rules
@@ -141,6 +140,20 @@ kubectl rollout status deployment/kaiserclaim-api -n kaiserclaim
 
 The API is exposed at `http://kaiserclaim.local` via Traefik (add to your LAN DNS or `/etc/hosts`).
 
+## Merkur dry run
+
+Before the first real submission, verify the full wizard flow without filing a claim:
+
+```bash
+playwright install chromium   # once
+python scripts/dry_run_merkur.py \
+    --receipt /path/to/receipt.pdf \
+    --patient "Name substring" \
+    --iban AT232081500044776086
+```
+
+The script reuses the persistent browser session (`scripts/.merkur_session/`), walks all five wizard steps (Vertrag → Versicherte Person → Überweisungskonto → Dateiauswahl → Zusammenfassung), and stops before the final submit. Add `--debug-pause` to drop into the Playwright Inspector at any point.
+
 ## ÖGK 2FA (ID-Austria)
 
 The ÖGK bot uses a persistent Playwright browser context stored at `STORAGE_ROOT/.oegk_browser_session`. On first run the browser window opens for you to complete the ID-Austria login. Subsequent runs reuse the saved session. The session volume is mounted into the worker pod so it survives restarts.
@@ -162,4 +175,5 @@ Every database table carries a `user_id` column. The architecture is SaaS-ready 
 | `SECRET_KEY` | App secret (JWT signing, future use) |
 | `MERKUR_USERNAME` | Merkur portal login email |
 | `MERKUR_PASSWORD` | Merkur portal password |
+| `MERKUR_BANK_IBAN` | IBAN to select for reimbursement transfers (no spaces) |
 | `DEBUG` | Enable SQLAlchemy query logging (default: false) |
