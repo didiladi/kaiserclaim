@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 SESSION_DIR = Path(__file__).parent / ".merkur_session"
 
 
-async def run(receipt: str, patient: str, iban: str) -> None:
+async def run(receipt: str, patient: str, iban: str, debug_pause: bool = False) -> None:
     # Import here so get_settings() picks up .env from the project root.
     from workers.playwright_bot import MerkurBot
 
@@ -70,6 +70,7 @@ async def run(receipt: str, patient: str, iban: str) -> None:
                 date="01.01.2025",
                 patient_name=patient,
                 stop_before_submit=True,
+                debug_pause=debug_pause,
             )
             if result is False:
                 print("\n✓  Dry run complete — stopped before submit.  No claim was filed.")
@@ -95,6 +96,8 @@ def main() -> None:
     parser.add_argument("--receipt", required=True, help="Path to receipt PDF/JPG")
     parser.add_argument("--patient", default="", help="Patient name substring to match")
     parser.add_argument("--iban", default="", help="IBAN to select (without spaces)")
+    parser.add_argument("--debug-pause", action="store_true",
+                        help="Pause in Playwright Inspector before step 0 so you can manually interact")
     args = parser.parse_args()
 
     receipt = str(Path(args.receipt).expanduser().resolve())
@@ -102,7 +105,7 @@ def main() -> None:
         print(f"Error: receipt file not found: {receipt}")
         sys.exit(1)
 
-    asyncio.run(run(receipt, args.patient, args.iban))
+    asyncio.run(run(receipt, args.patient, args.iban, args.debug_pause))
 
 
 if __name__ == "__main__":

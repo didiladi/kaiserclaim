@@ -35,6 +35,7 @@ class MerkurBot:
         date: str,
         patient_name: str = "",
         stop_before_submit: bool = False,
+        debug_pause: bool = False,
     ) -> bool:
         _MERKUR_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
         async with async_playwright() as pw:
@@ -46,7 +47,8 @@ class MerkurBot:
             page = context.pages[0] if context.pages else await context.new_page()
             try:
                 return await self._submit(
-                    context, page, invoice_pdf, amount, date, patient_name, stop_before_submit
+                    context, page, invoice_pdf, amount, date, patient_name,
+                    stop_before_submit, debug_pause,
                 )
             finally:
                 await context.close()
@@ -101,14 +103,52 @@ class MerkurBot:
             await page.goto(fallback_url, wait_until="networkidle")
 
     async def _weiter(self, page: Page) -> None:
-        """Click the currently visible WEITER button.
+        """Click the currently visible WEITER button via JS.
 
-        All button[matsteppernext] elements are rendered in the DOM simultaneously
-        but only the active step's button is visible. :visible filters to the one
-        that can actually be clicked.
+        Playwright's actionability checks block on disabled buttons even when
+        Angular's (click) handler would fire. JS element.click() bypasses the
+        disabled guard and dispatches the event Angular's stepper.next() listens to.
         """
-        await page.locator("button[matsteppernext]:visible").click()
+        await page.evaluate("""() => {
+            const btns = [...document.querySelectorAll('button[matsteppernext]')];
+            const visible = btns.find(b => {
+                const r = b.getBoundingClientRect();
+                return r.width > 0 || r.height > 0;
+            });
+            if (visible) visible.click();
+        }""")
         await page.wait_for_timeout(800)
+
+    async def _click_visible_radio(self, page: Page, text: str) -> bool:
+        """Click the mat-radio-touch-target of the first visible radio whose text contains *text*.
+
+        Inactive step panels have display:none so getBoundingClientRect() returns zeros —
+        that filter ensures we only act on the currently active step's radios.
+        Clicking the touch-target fires Angular Material's _onTouchTargetClick BEFORE the
+        native input is checked, allowing _onInputInteraction to pass its guard.
+        """
+        return await page.evaluate("""(text) => {
+            for (const btn of document.querySelectorAll('mat-radio-button')) {
+                if (!btn.textContent.includes(text)) continue;
+                const rect = btn.getBoundingClientRect();
+                if (rect.width === 0 && rect.height === 0) continue;
+                const target = btn.querySelector('.mat-mdc-radio-touch-target') || btn;
+                target.click();
+                return true;
+            }
+            return false;
+        }""", text)
+
+    async def _wait_for_visible_radio(self, page: Page, text: str, timeout: int = 5_000) -> None:
+        """Wait until a radio button containing *text* has a non-zero bounding rect."""
+        await page.wait_for_function("""(text) => {
+            for (const btn of document.querySelectorAll('mat-radio-button')) {
+                if (!btn.textContent.includes(text)) continue;
+                const rect = btn.getBoundingClientRect();
+                if (rect.width > 0 || rect.height > 0) return true;
+            }
+            return false;
+        }""", arg=text, timeout=timeout)
 
     async def _submit(
         self,
@@ -119,6 +159,7 @@ class MerkurBot:
         date: str,
         patient_name: str = "",
         stop_before_submit: bool = False,
+        debug_pause: bool = False,
     ) -> bool:
         # ── Land on Liferay portal ──────────────────────────────────────────────
         await page.goto(_MERKUR_FORM_URL, wait_until="networkidle")
@@ -152,50 +193,76 @@ class MerkurBot:
             )
 
         # ── Step 0: Vertrag ─────────────────────────────────────────────────────
-        # Single pre-selected radio. The form may auto-advance past this step on
-        # load; only click WEITER if it is currently visible.
-        if await form_page.locator("button[matsteppernext]:visible").count() > 0:
-            await self._weiter(form_page)
+        # Wait for Angular to finish bootstrapping (WEITER starts disabled).
+        await form_page.wait_for_function(
+            "() => !document.querySelector('button[matsteppernext]')?.disabled",
+            timeout=15_000,
+        )
+        await self._weiter(form_page)
+
+        if debug_pause:
+            print("\n[debug] Now on Person step — browser is paused.")
+            print("[debug] Click Resume when done observing.")
+            await form_page.pause()
 
         # ── Step 1: Versicherte Person ──────────────────────────────────────────
-        # Wait for the Person step to be active, then select by name.
-        await form_page.wait_for_selector("mat-step-header#cdk-stepper-0-label-1", timeout=10_000)
         if patient_name:
-            person_btn = (
-                form_page
-                .locator("mat-radio-button")
-                .filter(has=form_page.locator("input[name='mat-radio-group-1']"))
-                .filter(has_text=patient_name)
-            )
-            if await person_btn.count() == 0:
-                all_btns = form_page.locator("mat-radio-button").filter(
-                    has=form_page.locator("input[name='mat-radio-group-1']")
-                )
-                names = [
-                    (await all_btns.nth(i).inner_text()).strip()
-                    for i in range(await all_btns.count())
-                ]
+            # Wait for the step 1 content to finish rendering, then give Angular
+            # an extra moment to register click handlers on the radio components.
+            # The bounding rect becomes non-zero before Angular finishes wiring up
+            # event listeners — without the extra wait, the touch-target click fires
+            # before _onTouchTargetClick is bound and nothing happens.
+            await self._wait_for_visible_radio(form_page, patient_name, timeout=10_000)
+            await form_page.wait_for_timeout(800)
+            found = await self._click_visible_radio(form_page, patient_name)
+            if not found:
+                available = await form_page.evaluate("""() =>
+                    [...document.querySelectorAll('mat-radio-button')]
+                        .filter(b => { const r = b.getBoundingClientRect();
+                                       return r.width > 0 || r.height > 0; })
+                        .map(b => b.textContent.trim())
+                """)
                 raise RuntimeError(
                     f"Merkur: '{patient_name}' not found in Versicherte Person list. "
-                    f"Available: {names}"
+                    f"Visible options: {available}"
                 )
-            # Click the inner <label> — the visible element Angular wires to the
-            # form control. Clicking the mat-radio-button wrapper (even with force)
-            # doesn't trigger Angular's reactive-form change detection.
-            await person_btn.first.locator("label").click()
-        await self._weiter(form_page)
+            # Portal auto-advances on person selection; wait for IBAN radios to appear.
+            try:
+                await self._wait_for_visible_radio(form_page, "AT", timeout=5_000)
+            except Exception:
+                await self._weiter(form_page)
+        else:
+            await self._weiter(form_page)
 
         # ── Step 2: Überweisungskonto ───────────────────────────────────────────
-        # mat-radio-group-2; value = IBAN without spaces. First option pre-selected.
         target_iban = settings.merkur_bank_iban.replace(" ", "")
         if target_iban:
-            iban_btn = form_page.locator(
-                f"mat-radio-button:has(input[name='mat-radio-group-2'][value='{target_iban}'])"
-            )
-            if await iban_btn.count() == 0:
+            # The portal displays IBANs with spaces; strip both sides before comparing.
+            btn_id = await form_page.evaluate("""(iban) => {
+                for (const btn of document.querySelectorAll('mat-radio-button')) {
+                    if (!btn.textContent.replace(/\\s/g, '').includes(iban)) continue;
+                    const rect = btn.getBoundingClientRect();
+                    if (rect.width === 0 && rect.height === 0) continue;
+                    return btn.id;
+                }
+                return null;
+            }""", target_iban)
+            if not btn_id:
                 raise RuntimeError(f"Merkur: IBAN '{target_iban}' not found")
-            await iban_btn.locator("label").click()
-        await self._weiter(form_page)
+            await form_page.locator(f"#{btn_id} .mat-mdc-radio-touch-target").click(force=True)
+            # Wait for file-upload step to appear; fall back to WEITER.
+            try:
+                await form_page.wait_for_function(
+                    "() => { const i = document.querySelector('input[type=file]');"
+                    " if (!i) return false;"
+                    " const r = i.getBoundingClientRect();"
+                    " return r.width > 0 || r.height > 0; }",
+                    timeout=3_000,
+                )
+            except Exception:
+                await self._weiter(form_page)
+        else:
+            await self._weiter(form_page)
 
         # ── Step 3: Dateiauswahl ────────────────────────────────────────────────
         # The file input is hidden (0x0); set_input_files works on hidden inputs.
@@ -204,10 +271,17 @@ class MerkurBot:
         await self._weiter(form_page)
 
         # ── Step 4: Zusammenfassung ─────────────────────────────────────────────
-        # Click the mat-checkbox label to trigger Angular's change detection.
+        # Same touch-target pattern: click mat-mdc-checkbox-touch-target so Angular
+        # Material's handler fires before the native checked state changes.
         chk_input = form_page.locator("#mat-mdc-checkbox-0-input")
         if not await chk_input.is_checked():
-            await form_page.locator("mat-checkbox label").click()
+            await form_page.evaluate("""() => {
+                const cb = document.getElementById('mat-mdc-checkbox-0-input')
+                    ?.closest('mat-checkbox');
+                const target = cb?.querySelector('.mat-mdc-checkbox-touch-target') || cb;
+                if (target) target.click();
+            }""")
+            await form_page.wait_for_timeout(300)
 
         if stop_before_submit:
             return False
