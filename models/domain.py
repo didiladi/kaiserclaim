@@ -46,6 +46,22 @@ class User(Base):
 
     contracts = relationship("InsuranceContract", back_populates="user", cascade="all, delete-orphan")
     invoices = relationship("Invoice", back_populates="user", cascade="all, delete-orphan")
+    family_members = relationship("FamilyMember", back_populates="user", cascade="all, delete-orphan")
+
+
+class FamilyMember(Base):
+    __tablename__ = "family_members"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    member_key = Column(String, nullable=False)   # stable slug: 'maria', 'thomas', etc. — used as FK by FE
+    name = Column(String, nullable=False)
+    color = Column(String, nullable=False)        # hex color, e.g. '#E84393'
+    initials = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    user = relationship("User", back_populates="family_members")
+    invoices = relationship("Invoice", back_populates="family_member")
 
 
 class InsuranceContract(Base):
@@ -90,8 +106,13 @@ class Invoice(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     benefit_rule_id = Column(UUID(as_uuid=True), ForeignKey("benefit_rules.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Denormalized benefit/category label for display when benefit_rule_id is not set
+    category = Column(String, nullable=True)
+    # FK to the family member this invoice belongs to
+    family_member_id = Column(UUID(as_uuid=True), ForeignKey("family_members.id", ondelete="SET NULL"), nullable=True, index=True)
 
     user = relationship("User", back_populates="invoices")
+    family_member = relationship("FamilyMember", back_populates="invoices")
     benefit_usages = relationship("BenefitUsage", back_populates="invoice", cascade="all, delete-orphan")
 
 

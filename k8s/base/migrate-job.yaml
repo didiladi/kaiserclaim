@@ -14,7 +14,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: migrate
-          image: ghcr.io/YOUR_ORG/kaiserclaim:latest
+          image: ghcr.io/didiladi/kaiserclaim:latest
           imagePullPolicy: Always
           command: ["alembic", "upgrade", "head"]
           envFrom:

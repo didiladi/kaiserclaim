@@ -7,8 +7,8 @@ metadata:
   namespace: kaiserclaim
 spec:
   accessModes:
-    - ReadWriteMany   # shared between api + worker pods
-  storageClassName: nfs-client   # change to your provisioner class
+    - ReadWriteOnce
+  storageClassName: local-path
   resources:
     requests:
-      storage: 50Gi
+      storage: 10Gi

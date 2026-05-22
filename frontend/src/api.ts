@@ -11,7 +11,11 @@ export interface Invoice {
   amount: number | null;
   date: string | null;
   benefit_rule_id: string | null;
+  category: string | null;
+  family_member_id: string | null;
   status: InvoiceStatus;
+  pipeline: "standard" | "pharmacy";
+  current_step: number;
   created_at: string;
   updated_at: string;
 }
@@ -25,6 +29,16 @@ export type InvoiceStatus =
   | "READY_FOR_MERKUR"
   | "MERKUR_SUBMITTED"
   | "COMPLETED";
+
+export interface FamilyMember {
+  id: string;
+  user_id: string;
+  member_key: string;
+  name: string;
+  color: string;
+  initials: string;
+  created_at: string;
+}
 
 export interface Contract {
   id: string;
@@ -45,6 +59,45 @@ export interface BenefitRule {
   amount_remaining: number;
 }
 
+export interface DashboardSummary {
+  year: number;
+  total_paid: number;
+  total_reimbursed: number;
+  in_progress_count: number;
+  eigenanteil: number;
+  benefit_alerts: { benefit_name: string; percent_used: number; used: number; limit: number }[];
+}
+
+export interface MonthlyStats {
+  month: string;
+  total: number;
+  by_member: Record<string, number>;
+}
+
+export interface YearlyStats {
+  year: number;
+  total_paid: number;
+  total_reimbursed: number;
+  eigenanteil: number;
+}
+
+export interface MemberStats {
+  member_key: string;
+  name: string;
+  color: string;
+  initials: string;
+  invoice_count: number;
+  total_paid: number;
+  total_reimbursed: number;
+  eigenanteil: number;
+  share_pct: number;
+  categories: { name: string; amount: number }[];
+}
+
+// ---------------------------------------------------------------------------
+// HTTP helper
+// ---------------------------------------------------------------------------
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const sep = path.includes("?") ? "&" : "?";
   const res = await fetch(`${BASE}${path}${sep}user_id=${USER_ID}`, init);
@@ -52,20 +105,33 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export function listInvoices(): Promise<Invoice[]> {
-  return apiFetch<Invoice[]>("/invoices/");
+// ---------------------------------------------------------------------------
+// Invoices
+// ---------------------------------------------------------------------------
+
+export function listInvoices(params?: { member_key?: string; status_group?: string; search?: string }): Promise<Invoice[]> {
+  const qs = new URLSearchParams();
+  if (params?.member_key) qs.set("member_key", params.member_key);
+  if (params?.status_group) qs.set("status_group", params.status_group);
+  if (params?.search) qs.set("search", params.search);
+  const q = qs.toString();
+  return apiFetch<Invoice[]>(`/invoices/${q ? "?" + q : ""}`);
 }
 
 export function getInvoice(id: string): Promise<Invoice> {
   return apiFetch<Invoice>(`/invoices/${id}`);
 }
 
-export async function uploadInvoice(file: File, benefitRuleId?: string): Promise<Invoice> {
+export async function uploadInvoice(
+  file: File,
+  opts?: { benefitRuleId?: string; familyMemberId?: string; category?: string }
+): Promise<Invoice> {
   const form = new FormData();
   form.append("file", file);
-  if (benefitRuleId) form.append("benefit_rule_id", benefitRuleId);
-  const sep = "?";
-  const res = await fetch(`${BASE}/invoices/upload${sep}user_id=${USER_ID}`, {
+  if (opts?.benefitRuleId) form.append("benefit_rule_id", opts.benefitRuleId);
+  if (opts?.familyMemberId) form.append("family_member_id", opts.familyMemberId);
+  if (opts?.category) form.append("category", opts.category);
+  const res = await fetch(`${BASE}/invoices/upload?user_id=${USER_ID}`, {
     method: "POST",
     body: form,
   });
@@ -80,10 +146,71 @@ export function submitToMerkur(id: string): Promise<Invoice> {
   return apiFetch<Invoice>(`/invoices/${id}/submit-merkur`, { method: "POST" });
 }
 
+// ---------------------------------------------------------------------------
+// Contracts & benefits
+// ---------------------------------------------------------------------------
+
 export function listContracts(): Promise<Contract[]> {
   return apiFetch<Contract[]>("/contracts/");
 }
 
 export function getBenefits(contractId: string): Promise<BenefitRule[]> {
   return apiFetch<BenefitRule[]>(`/contracts/${contractId}/benefits`);
+}
+
+export async function createContract(data: { provider_name: string; policy_number?: string }): Promise<Contract> {
+  return apiFetch<Contract>("/contracts/", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export async function parseContractPdf(contractId: string, file: File): Promise<BenefitRule[]> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${BASE}/contracts/${contractId}/parse-pdf?user_id=${USER_ID}`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<BenefitRule[]>;
+}
+
+// ---------------------------------------------------------------------------
+// Family
+// ---------------------------------------------------------------------------
+
+export function listFamilyMembers(): Promise<FamilyMember[]> {
+  return apiFetch<FamilyMember[]>("/family/");
+}
+
+export function createFamilyMember(data: { member_key: string; name: string; color: string; initials: string }): Promise<FamilyMember> {
+  return apiFetch<FamilyMember>("/family/", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard & stats
+// ---------------------------------------------------------------------------
+
+export function getDashboardSummary(year = 2026, member_key?: string): Promise<DashboardSummary> {
+  const qs = `year=${year}${member_key ? `&member_key=${member_key}` : ""}`;
+  return apiFetch<DashboardSummary>(`/dashboard/summary?${qs}`);
+}
+
+export function getMonthlyStats(year = 2026, member_key?: string): Promise<MonthlyStats[]> {
+  const qs = `year=${year}${member_key ? `&member_key=${member_key}` : ""}`;
+  return apiFetch<MonthlyStats[]>(`/stats/monthly?${qs}`);
+}
+
+export function getYearlyStats(): Promise<YearlyStats[]> {
+  return apiFetch<YearlyStats[]>("/stats/yearly");
+}
+
+export function getMemberStats(year = 2026): Promise<MemberStats[]> {
+  return apiFetch<MemberStats[]>(`/stats/members?year=${year}`);
 }

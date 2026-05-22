@@ -7,6 +7,7 @@ resources:
   - namespace.yaml
   - secret.yaml
   - pvc.yaml
+  - redis.yaml
   - migrate-job.yaml
   - api-deployment.yaml
   - worker-deployment.yaml

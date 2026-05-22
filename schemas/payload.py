@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Literal
 
 from pydantic import BaseModel, EmailStr, ConfigDict
 
@@ -28,6 +28,27 @@ class UserCreate(BaseModel):
 class UserRead(_Base):
     id: uuid.UUID
     email: str
+    created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# FamilyMember
+# ---------------------------------------------------------------------------
+
+class FamilyMemberCreate(BaseModel):
+    member_key: str
+    name: str
+    color: str
+    initials: str
+
+
+class FamilyMemberRead(_Base):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    member_key: str
+    name: str
+    color: str
+    initials: str
     created_at: datetime
 
 
@@ -85,10 +106,39 @@ class InvoiceCreate(BaseModel):
     amount: Optional[float] = None
     date: Optional[datetime] = None
     benefit_rule_id: Optional[uuid.UUID] = None
+    category: Optional[str] = None
+    family_member_id: Optional[uuid.UUID] = None
 
 
 class InvoiceStatusUpdate(BaseModel):
     status: InvoiceStatus
+
+
+# Pipeline variant: pharmacy skips ÖGK; standard goes through all 8 steps.
+_PHARMACY_CATEGORIES = {"medikamente", "apotheke", "pharmaz"}
+
+def _derive_pipeline(category: Optional[str]) -> Literal["standard", "pharmacy"]:
+    if category and any(k in category.lower() for k in _PHARMACY_CATEGORIES):
+        return "pharmacy"
+    return "standard"
+
+# Ordered list of statuses — index = current_step
+_STATUS_ORDER = [
+    InvoiceStatus.RECEIVED,
+    InvoiceStatus.OCR_PROCESSING,
+    InvoiceStatus.READY_FOR_OEGK,
+    InvoiceStatus.OEGK_SUBMITTED,
+    InvoiceStatus.OEGK_REFUNDED,
+    InvoiceStatus.READY_FOR_MERKUR,
+    InvoiceStatus.MERKUR_SUBMITTED,
+    InvoiceStatus.COMPLETED,
+]
+
+def _current_step(status: InvoiceStatus) -> int:
+    try:
+        return _STATUS_ORDER.index(status)
+    except ValueError:
+        return 0
 
 
 class InvoiceRead(_Base):
@@ -100,9 +150,20 @@ class InvoiceRead(_Base):
     amount: Optional[float]
     date: Optional[datetime]
     benefit_rule_id: Optional[uuid.UUID]
+    category: Optional[str]
+    family_member_id: Optional[uuid.UUID]
     status: InvoiceStatus
     created_at: datetime
     updated_at: datetime
+    pipeline: Literal["standard", "pharmacy"] = "standard"
+    current_step: int = 0
+
+    @classmethod
+    def model_validate(cls, obj, **kwargs):
+        instance = super().model_validate(obj, **kwargs)
+        instance.pipeline = _derive_pipeline(instance.category)
+        instance.current_step = _current_step(instance.status)
+        return instance
 
 
 # ---------------------------------------------------------------------------

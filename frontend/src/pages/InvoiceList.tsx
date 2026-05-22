@@ -1,94 +1,98 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import { listInvoices, Invoice, InvoiceStatus } from "../api";
+import { useNavigate } from "react-router-dom";
+import { Search, Receipt } from "lucide-react";
+import { listInvoices } from "../api";
+import type { Invoice } from "../api";
+import { useAppContext } from "../state/AppContext";
+import { FamilyFilterPills } from "../components/FamilyFilterPills";
+import { InvoiceCard } from "../components/InvoiceCard";
+import { KCCard } from "../components/KCCard";
+import clsx from "clsx";
 
-const TERMINAL: InvoiceStatus[] = ["COMPLETED", "MERKUR_SUBMITTED", "READY_FOR_MERKUR"];
+type FilterGroup = "all" | "in_progress" | "completed";
 
-const STATUS_LABEL: Record<InvoiceStatus, string> = {
-  RECEIVED: "Received",
-  OCR_PROCESSING: "OCR…",
-  READY_FOR_OEGK: "Ready for ÖGK",
-  OEGK_SUBMITTED: "ÖGK Submitted",
-  OEGK_REFUNDED: "ÖGK Refunded",
-  READY_FOR_MERKUR: "Ready for Merkur",
-  MERKUR_SUBMITTED: "Merkur Submitted",
-  COMPLETED: "Completed",
+const FILTER_LABELS: Record<FilterGroup, string> = {
+  all: "Alle",
+  in_progress: "Laufend",
+  completed: "Fertig",
 };
 
-const STATUS_COLOR: Record<InvoiceStatus, string> = {
-  RECEIVED: "bg-gray-100 text-gray-600",
-  OCR_PROCESSING: "bg-yellow-100 text-yellow-700",
-  READY_FOR_OEGK: "bg-blue-100 text-blue-700",
-  OEGK_SUBMITTED: "bg-blue-100 text-blue-700",
-  OEGK_REFUNDED: "bg-indigo-100 text-indigo-700",
-  READY_FOR_MERKUR: "bg-orange-100 text-orange-700",
-  MERKUR_SUBMITTED: "bg-purple-100 text-purple-700",
-  COMPLETED: "bg-green-100 text-green-700",
-};
-
-function timeAgo(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
-}
-
-export default function InvoiceList() {
+export function InvoiceList() {
+  const { activeMember, familyMembers } = useAppContext();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<FilterGroup>("all");
+  const [search, setSearch] = useState("");
+  const navigate = useNavigate();
+
+  const memberKey = activeMember === "all" ? undefined : activeMember;
+  const activeMemberObj = familyMembers.find((m) => m.member_key === activeMember);
 
   useEffect(() => {
-    let active = true;
-
-    async function load() {
-      try {
-        const data = await listInvoices();
-        if (active) setInvoices(data);
-        const hasActive = data.some((inv) => !TERMINAL.includes(inv.status));
-        if (active && hasActive) setTimeout(load, 3000);
-      } catch (e) {
-        if (active) setError(e instanceof Error ? e.message : "Failed to load");
-      }
-    }
-
-    load();
-    return () => { active = false; };
-  }, []);
-
-  if (error) return <p className="mt-6 text-red-600">{error}</p>;
+    listInvoices({ member_key: memberKey, status_group: filter === "all" ? undefined : filter, search: search || undefined })
+      .then(setInvoices)
+      .catch(() => {});
+  }, [activeMember, filter, search]);
 
   return (
-    <div className="mt-6">
-      <h1 className="text-xl font-bold mb-4">Invoices</h1>
-      {invoices.length === 0 && (
-        <p className="text-gray-500 text-sm">No invoices yet. Upload a receipt to get started.</p>
-      )}
-      <ul className="space-y-2">
-        {invoices.map((inv) => (
-          <li key={inv.id}>
-            <Link
-              to={`/invoices/${inv.id}`}
-              className="flex items-center justify-between bg-white rounded-xl px-4 py-3 shadow-sm hover:shadow-md transition-shadow"
-            >
-              <div>
-                <p className="font-medium text-gray-900">
-                  {inv.date ? new Date(inv.date).toLocaleDateString("de-AT") : "—"}
-                  {inv.amount != null && (
-                    <span className="ml-2 text-gray-600">€{inv.amount.toFixed(2)}</span>
-                  )}
-                </p>
-                <p className="text-xs text-gray-400 mt-0.5">{timeAgo(inv.created_at)}</p>
-              </div>
-              <span className={`text-xs font-medium px-2 py-1 rounded-full ${STATUS_COLOR[inv.status]}`}>
-                {STATUS_LABEL[inv.status]}
-              </span>
-            </Link>
-          </li>
+    <div className="pb-4">
+      <FamilyFilterPills />
+
+      <div className="px-5 mb-4">
+        <h1 className="text-[22px] font-bold text-kc-text">
+          Belege{activeMemberObj ? ` — ${activeMemberObj.name.split(" ")[0]}` : ""}
+        </h1>
+      </div>
+
+      {/* Search */}
+      <div className="px-5 mb-3">
+        <div className="relative">
+          <Search size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-kc-textTri pointer-events-none" />
+          <input
+            className="w-full h-11 bg-kc-surfaceAlt rounded-md pl-10 pr-4 text-[14px] text-kc-text border border-transparent focus:outline-none focus:border-kc-accent placeholder:text-kc-textTri"
+            placeholder="Belege durchsuchen..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+      </div>
+
+      {/* Status filter tabs */}
+      <div className="flex gap-2 px-5 mb-4">
+        {(Object.keys(FILTER_LABELS) as FilterGroup[]).map((key) => (
+          <button
+            key={key}
+            onClick={() => setFilter(key)}
+            className={clsx(
+              "px-3.5 py-1.5 rounded-full text-[13px] font-semibold transition-colors",
+              filter === key ? "bg-kc-brand text-white" : "bg-kc-surfaceAlt text-kc-textSec"
+            )}
+          >
+            {FILTER_LABELS[key]}
+          </button>
         ))}
-      </ul>
+      </div>
+
+      {/* List */}
+      {invoices.length > 0 ? (
+        <KCCard className="mx-5 divide-y divide-kc-borderLight">
+          {invoices.map((inv) => (
+            <InvoiceCard
+              key={inv.id}
+              invoice={inv}
+              members={familyMembers}
+              onClick={() => navigate(`/invoices/${inv.id}`)}
+            />
+          ))}
+        </KCCard>
+      ) : (
+        <div className="flex flex-col items-center gap-3 py-16 text-center px-8">
+          <Receipt size={40} className="text-kc-textTri" />
+          <p className="text-[15px] font-semibold text-kc-text">Keine Belege gefunden</p>
+          <p className="text-[13px] text-kc-textSec">
+            {search ? "Keine Belege für diese Suche." : "Laden Sie Ihren ersten Beleg hoch."}
+          </p>
+        </div>
+      )}
     </div>
   );
 }

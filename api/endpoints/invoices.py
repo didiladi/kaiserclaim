@@ -4,14 +4,14 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_current_user
 from core.config import get_settings
 from core.database import get_db
-from models.domain import Invoice, InvoiceStatus, User
+from models.domain import FamilyMember, Invoice, InvoiceStatus, User
 from schemas.payload import InvoiceCreate, InvoiceRead, InvoiceStatusUpdate
 from workers.tasks import run_ocr, submit_to_merkur
 
@@ -31,6 +31,8 @@ router = APIRouter(prefix="/invoices", tags=["invoices"])
 async def upload_invoice(
     file: Annotated[UploadFile, File(...)],
     benefit_rule_id: Annotated[UUID | None, Form()] = None,
+    family_member_id: Annotated[UUID | None, Form()] = None,
+    category: Annotated[str | None, Form()] = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -48,7 +50,13 @@ async def upload_invoice(
     with dest_path.open("wb") as out:
         shutil.copyfileobj(file.file, out)
 
-    invoice = Invoice(user_id=current_user.id, file_path=str(dest_path), benefit_rule_id=benefit_rule_id)
+    invoice = Invoice(
+        user_id=current_user.id,
+        file_path=str(dest_path),
+        benefit_rule_id=benefit_rule_id,
+        family_member_id=family_member_id,
+        category=category,
+    )
     db.add(invoice)
     await db.commit()
     await db.refresh(invoice)
@@ -76,12 +84,32 @@ async def create_invoice(
 
 @router.get("/", response_model=list[InvoiceRead])
 async def list_invoices(
+    member_key: str | None = Query(default=None, description="Filter by family member key"),
+    status_group: str | None = Query(default=None, description="all | in_progress | completed"),
+    search: str | None = Query(default=None, description="Case-insensitive search on provider_name"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(Invoice).where(Invoice.user_id == current_user.id).order_by(Invoice.created_at.desc())
-    )
+    from sqlalchemy import and_, ilike_op, or_
+    stmt = select(Invoice).where(Invoice.user_id == current_user.id)
+
+    if member_key:
+        member_sub = select(FamilyMember.id).where(
+            FamilyMember.user_id == current_user.id,
+            FamilyMember.member_key == member_key,
+        ).scalar_subquery()
+        stmt = stmt.where(Invoice.family_member_id == member_sub)
+
+    if status_group == "in_progress":
+        stmt = stmt.where(Invoice.status != InvoiceStatus.COMPLETED)
+    elif status_group == "completed":
+        stmt = stmt.where(Invoice.status == InvoiceStatus.COMPLETED)
+
+    if search:
+        stmt = stmt.where(Invoice.provider_name.ilike(f"%{search}%"))
+
+    stmt = stmt.order_by(Invoice.created_at.desc())
+    result = await db.execute(stmt)
     return result.scalars().all()
 
 

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="de-AT">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <title>KaiserClaim</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body, #root {
+      height: 100%; width: 100%;
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      background: #F8F7F4;
+      overflow: hidden;
+    }
+    #root {
+      max-width: 430px;
+      margin: 0 auto;
+      position: relative;
+      box-shadow: 0 0 40px rgba(0,0,0,0.08);
+    }
+    @media (min-width: 431px) {
+      body { background: #E8E7E4; display: flex; align-items: center; justify-content: center; }
+      #root { border-radius: 24px; height: min(100vh - 40px, 900px); overflow: hidden; }
+    }
+    @media (max-width: 430px) {
+      #root { max-width: 100%; box-shadow: none; }
+    }
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 0; }
+    /* Animations */
+    @keyframes kcSpin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    @keyframes kcPulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    @keyframes kcPop {
+      0% { transform: scale(0.5); opacity: 0; }
+      70% { transform: scale(1.1); }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    @keyframes kcProgress {
+      from { width: 0%; }
+      to { width: 100%; }
+    }
+    /* Focus styles */
+    button:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 2px solid #0D9488;
+      outline-offset: 2px;
+    }
+    input::placeholder { color: #9CA3AF; }
+    select { color: inherit; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- React + Babel -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <!-- App scripts -->
+  <script type="text/babel" src="tweaks-panel.jsx"></script>
+  <script type="text/babel" src="kc-system.jsx"></script>
+  <script type="text/babel" src="kc-screens-main.jsx"></script>
+  <script type="text/babel" src="kc-screens-detail.jsx"></script>
+  <script type="text/babel" src="kc-screens-stats.jsx"></script>
+  <script type="text/babel" src="kc-app.jsx"></script>
+</body>
+</html>

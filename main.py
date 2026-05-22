@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.config import get_settings
-from api.endpoints import invoices, contracts, webhooks
+from api.endpoints import invoices, contracts, webhooks, family, stats
 
 settings = get_settings()
 
@@ -26,6 +26,8 @@ app.add_middleware(
 app.include_router(invoices.router, prefix="/api/v1")
 app.include_router(contracts.router, prefix="/api/v1")
 app.include_router(webhooks.router, prefix="/api/v1")
+app.include_router(family.router, prefix="/api/v1")
+app.include_router(stats.router, prefix="/api/v1")
 
 
 @app.get("/healthz")
