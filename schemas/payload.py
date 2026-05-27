@@ -6,7 +6,7 @@ from typing import Optional, Literal
 
 from pydantic import BaseModel, EmailStr, ConfigDict
 
-from models.domain import InvoiceStatus, LimitType
+from models.domain import InvoiceStatus, LimitType, MerkurResultState
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +131,8 @@ _STATUS_ORDER = [
     InvoiceStatus.OEGK_REFUNDED,
     InvoiceStatus.READY_FOR_MERKUR,
     InvoiceStatus.MERKUR_SUBMITTED,
+    InvoiceStatus.MERKUR_REIMBURSED,
+    InvoiceStatus.MERKUR_REJECTED,
     InvoiceStatus.COMPLETED,
 ]
 
@@ -157,12 +159,22 @@ class InvoiceRead(_Base):
     updated_at: datetime
     pipeline: Literal["standard", "pharmacy"] = "standard"
     current_step: int = 0
+    reimbursed_amount: Optional[float] = None
+    result_state: Optional[str] = None
 
     @classmethod
     def model_validate(cls, obj, **kwargs):
         instance = super().model_validate(obj, **kwargs)
         instance.pipeline = _derive_pipeline(instance.category)
         instance.current_step = _current_step(instance.status)
+        # Populate reimbursement info from the linked MerkurDocument (if eagerly loaded)
+        try:
+            doc = getattr(obj, "merkur_document", None)
+            if doc is not None:
+                instance.reimbursed_amount = doc.reimbursed_amount
+                instance.result_state = doc.result_state.value if doc.result_state else None
+        except Exception:
+            pass
         return instance
 
 
@@ -180,4 +192,23 @@ class BenefitUsageRead(_Base):
     invoice_id: uuid.UUID
     benefit_rule_id: uuid.UUID
     amount_used: float
+    created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# MerkurDocument
+# ---------------------------------------------------------------------------
+
+class MerkurDocumentRead(_Base):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    geschaeftsfall_nr: str
+    title: str
+    document_date: Optional[datetime]
+    file_path: Optional[str]
+    patient_name: Optional[str]
+    invoice_amount: Optional[float]
+    reimbursed_amount: Optional[float]
+    result_state: MerkurResultState
+    invoice_id: Optional[uuid.UUID]
     created_at: datetime

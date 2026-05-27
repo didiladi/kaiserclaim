@@ -3,7 +3,7 @@ import enum
 from datetime import datetime
 
 from sqlalchemy import (
-    Column, String, Float, DateTime, ForeignKey, Enum as SAEnum, func
+    Column, String, Float, DateTime, ForeignKey, Enum as SAEnum, Text, func
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -30,7 +30,15 @@ class InvoiceStatus(str, enum.Enum):
     OEGK_REFUNDED = "OEGK_REFUNDED"
     READY_FOR_MERKUR = "READY_FOR_MERKUR"
     MERKUR_SUBMITTED = "MERKUR_SUBMITTED"
+    MERKUR_REIMBURSED = "MERKUR_REIMBURSED"
+    MERKUR_REJECTED = "MERKUR_REJECTED"
     COMPLETED = "COMPLETED"
+
+
+class MerkurResultState(str, enum.Enum):
+    REIMBURSED = "REIMBURSED"
+    REJECTED = "REJECTED"
+    UNKNOWN = "UNKNOWN"
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +55,7 @@ class User(Base):
     contracts = relationship("InsuranceContract", back_populates="user", cascade="all, delete-orphan")
     invoices = relationship("Invoice", back_populates="user", cascade="all, delete-orphan")
     family_members = relationship("FamilyMember", back_populates="user", cascade="all, delete-orphan")
+    merkur_documents = relationship("MerkurDocument", back_populates="user", cascade="all, delete-orphan")
 
 
 class FamilyMember(Base):
@@ -75,6 +84,7 @@ class InsuranceContract(Base):
 
     user = relationship("User", back_populates="contracts")
     benefit_rules = relationship("BenefitRule", back_populates="contract", cascade="all, delete-orphan")
+
 
 
 class BenefitRule(Base):
@@ -114,6 +124,7 @@ class Invoice(Base):
     user = relationship("User", back_populates="invoices")
     family_member = relationship("FamilyMember", back_populates="invoices")
     benefit_usages = relationship("BenefitUsage", back_populates="invoice", cascade="all, delete-orphan")
+    merkur_document = relationship("MerkurDocument", back_populates="invoice", uselist=False)
 
 
 class BenefitUsage(Base):
@@ -127,3 +138,24 @@ class BenefitUsage(Base):
 
     invoice = relationship("Invoice", back_populates="benefit_usages")
     benefit_rule = relationship("BenefitRule", back_populates="usages")
+
+
+class MerkurDocument(Base):
+    __tablename__ = "merkur_documents"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    geschaeftsfall_nr = Column(String, unique=True, nullable=False, index=True)
+    title = Column(String, nullable=False)
+    document_date = Column(DateTime(timezone=True), nullable=True)
+    file_path = Column(String, nullable=True)
+    patient_name = Column(String, nullable=True)
+    invoice_amount = Column(Float, nullable=True)
+    reimbursed_amount = Column(Float, nullable=True)
+    result_state = Column(SAEnum(MerkurResultState, name="merkurresultstate", create_type=False), nullable=False)
+    raw_text = Column(Text, nullable=True)
+    invoice_id = Column(UUID(as_uuid=True), ForeignKey("invoices.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    user = relationship("User", back_populates="merkur_documents")
+    invoice = relationship("Invoice", back_populates="merkur_document")

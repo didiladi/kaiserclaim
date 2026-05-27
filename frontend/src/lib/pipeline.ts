@@ -6,22 +6,24 @@ export interface PipelineStep {
 }
 
 const STANDARD_STEPS: PipelineStep[] = [
-  { statusKey: "RECEIVED",         label: "Empfangen" },
-  { statusKey: "OCR_PROCESSING",   label: "OCR-Verarbeitung" },
-  { statusKey: "READY_FOR_OEGK",   label: "Bereit für ÖGK" },
-  { statusKey: "OEGK_SUBMITTED",   label: "Bei ÖGK eingereicht" },
-  { statusKey: "OEGK_REFUNDED",    label: "Von ÖGK erstattet" },
-  { statusKey: "READY_FOR_MERKUR", label: "Bereit für Merkur" },
-  { statusKey: "MERKUR_SUBMITTED", label: "Bei Merkur eingereicht" },
-  { statusKey: "COMPLETED",        label: "Abgeschlossen" },
+  { statusKey: "RECEIVED",           label: "Empfangen" },
+  { statusKey: "OCR_PROCESSING",     label: "OCR-Verarbeitung" },
+  { statusKey: "READY_FOR_OEGK",     label: "Bereit für ÖGK" },
+  { statusKey: "OEGK_SUBMITTED",     label: "Bei ÖGK eingereicht" },
+  { statusKey: "OEGK_REFUNDED",      label: "Von ÖGK erstattet" },
+  { statusKey: "READY_FOR_MERKUR",   label: "Bereit für Merkur" },
+  { statusKey: "MERKUR_SUBMITTED",   label: "Bei Merkur eingereicht" },
+  { statusKey: "MERKUR_REIMBURSED",  label: "Merkur Entscheidung" },
+  { statusKey: "COMPLETED",          label: "Abgeschlossen" },
 ];
 
 const PHARMACY_STEPS: PipelineStep[] = [
-  { statusKey: "RECEIVED",         label: "Empfangen" },
-  { statusKey: "OCR_PROCESSING",   label: "OCR-Verarbeitung" },
-  { statusKey: "READY_FOR_MERKUR", label: "Bereit für Merkur" },
-  { statusKey: "MERKUR_SUBMITTED", label: "Bei Merkur eingereicht" },
-  { statusKey: "COMPLETED",        label: "Abgeschlossen" },
+  { statusKey: "RECEIVED",           label: "Empfangen" },
+  { statusKey: "OCR_PROCESSING",     label: "OCR-Verarbeitung" },
+  { statusKey: "READY_FOR_MERKUR",   label: "Bereit für Merkur" },
+  { statusKey: "MERKUR_SUBMITTED",   label: "Bei Merkur eingereicht" },
+  { statusKey: "MERKUR_REIMBURSED",  label: "Merkur Entscheidung" },
+  { statusKey: "COMPLETED",          label: "Abgeschlossen" },
 ];
 
 export function getPipelineSteps(variant: PipelineVariant): PipelineStep[] {
@@ -30,7 +32,9 @@ export function getPipelineSteps(variant: PipelineVariant): PipelineStep[] {
 
 export function getCurrentStepIndex(statusKey: string, variant: PipelineVariant): number {
   const steps = getPipelineSteps(variant);
-  const idx = steps.findIndex((s) => s.statusKey === statusKey);
+  // MERKUR_REJECTED maps to the same step as MERKUR_REIMBURSED ("Merkur Entscheidung")
+  const resolvedKey = statusKey === "MERKUR_REJECTED" ? "MERKUR_REIMBURSED" : statusKey;
+  const idx = steps.findIndex((s) => s.statusKey === resolvedKey);
   return idx >= 0 ? idx : 0;
 }
 

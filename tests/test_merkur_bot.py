@@ -12,6 +12,9 @@ Fixture → calibration snapshot mapping:
     04_step2_iban_selected.html → 04_step2_iban_selected.html
     05_step3_upload.html        → 05_step3_upload.html  (file attached)
     06_step4_summary.html       → 06_step4_summary.html (checkbox ticked)
+    07_inbox_ungelesen.html     → 07_inbox_ungelesen.html (Postfach "Ungelesen" section)
+    08_inbox_year_expanded.html → 08_inbox_year_expanded.html (year accordion expanded)
+    09_inbox_after_download_click.html → post-click snapshot
 """
 import pytest
 from pathlib import Path
@@ -26,6 +29,19 @@ FIXTURES = Path(__file__).parent / "fixtures" / "merkur"
 # NOTE: a[href="/kporclient/einreichung"] is injected by the Liferay Vue portlet
 # after page load and is absent from the static HTML snapshot. Verified in the
 # live portal by calibration; no static test needed here.
+
+# ---------------------------------------------------------------------------
+# Inbox selectors — confirmed by calibrate_merkur_inbox.py (2026-05-22)
+# ---------------------------------------------------------------------------
+
+INBOX_SELECTORS: dict[str, str] = {
+    # Only present on Ambulante Abrechnungsinformation rows
+    "download_btn": "button[aria-label='Zur Einreichung']",
+    # Date paragraph inside each row (id="documentDatum_N")
+    "date_para": "p[id^='documentDatum']",
+    # Year-group accordion headers (full_history expansion)
+    "year_header": "div.subheader-hover[tabindex='0']",
+}
 
 # Step 0: Vertrag — one pre-selected radio, advance with button[matsteppernext] nth(0)
 VERTRAG_SELECTORS: dict[str, str] = {
@@ -138,3 +154,55 @@ async def test_person_text_matching():
             f"Person radio labels don't contain DOB pattern: {texts}"
         )
         await browser.close()
+
+
+async def test_inbox_download_button_selector():
+    """Inbox snapshot — 'Zur Einreichung' button exists on Ambulante rows only."""
+    html = _load_fixture("07_inbox_ungelesen")
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(html, wait_until="domcontentloaded")
+        dl_btns = page.locator(INBOX_SELECTORS["download_btn"])
+        count = await dl_btns.count()
+        assert count >= 1, (
+            f"No '{INBOX_SELECTORS['download_btn']}' buttons found. "
+            "Re-run calibrate_merkur_inbox.py to update the selector."
+        )
+        # Confirm they are NOT present on ego4you rows — all matching rows must be Ambulante
+        for i in range(count):
+            btn = dl_btns.nth(i)
+            row_text = await btn.evaluate(
+                "(el) => el.closest('md-list-item')?.textContent || ''"
+            )
+            assert "Ambulante" in row_text, (
+                f"'Zur Einreichung' button found outside an Ambulante row: {row_text[:80]}"
+            )
+        await browser.close()
+
+
+async def test_inbox_date_selector():
+    """Inbox snapshot — documentDatum paragraphs match the expected DD.MM.YYYY pattern."""
+    html = _load_fixture("07_inbox_ungelesen")
+    import re
+    date_re = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(html, wait_until="domcontentloaded")
+        date_paras = page.locator(INBOX_SELECTORS["date_para"])
+        count = await date_paras.count()
+        assert count >= 1, (
+            f"No '{INBOX_SELECTORS['date_para']}' elements found in inbox snapshot."
+        )
+        # All date paragraphs must match DD.MM.YYYY
+        for i in range(count):
+            text = (await date_paras.nth(i).inner_text()).strip()
+            assert date_re.match(text), f"Date paragraph {i} has unexpected format: '{text}'"
+        await browser.close()
+
+
+async def test_inbox_year_header_selector():
+    """Expanded inbox snapshot — year accordion headers are present."""
+    html = _load_fixture("08_inbox_year_expanded")
+    await _assert_selectors(html, {"year_header": INBOX_SELECTORS["year_header"]})

@@ -18,6 +18,23 @@ export interface Invoice {
   current_step: number;
   created_at: string;
   updated_at: string;
+  reimbursed_amount: number | null;
+  result_state: "REIMBURSED" | "REJECTED" | "UNKNOWN" | null;
+}
+
+export interface MerkurDocument {
+  id: string;
+  user_id: string;
+  geschaeftsfall_nr: string;
+  title: string;
+  document_date: string | null;
+  file_path: string;
+  patient_name: string | null;
+  invoice_amount: number | null;
+  reimbursed_amount: number | null;
+  result_state: "REIMBURSED" | "REJECTED" | "UNKNOWN";
+  invoice_id: string | null;
+  created_at: string;
 }
 
 export type InvoiceStatus =
@@ -28,6 +45,8 @@ export type InvoiceStatus =
   | "OEGK_REFUNDED"
   | "READY_FOR_MERKUR"
   | "MERKUR_SUBMITTED"
+  | "MERKUR_REIMBURSED"
+  | "MERKUR_REJECTED"
   | "COMPLETED";
 
 export interface FamilyMember {
@@ -213,4 +232,16 @@ export function getYearlyStats(): Promise<YearlyStats[]> {
 
 export function getMemberStats(year = 2026): Promise<MemberStats[]> {
   return apiFetch<MemberStats[]>(`/stats/members?year=${year}`);
+}
+
+// ---------------------------------------------------------------------------
+// Merkur Postfach
+// ---------------------------------------------------------------------------
+
+export function triggerMerkurSync(fullHistory = false): Promise<{ task_id: string; full_history: boolean }> {
+  return apiFetch(`/merkur/sync?full_history=${fullHistory}`, { method: "POST" });
+}
+
+export function listMerkurDocuments(): Promise<MerkurDocument[]> {
+  return apiFetch<MerkurDocument[]>("/merkur/documents");
 }

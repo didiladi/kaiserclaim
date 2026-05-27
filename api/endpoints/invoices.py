@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from api.dependencies import get_current_user
 from core.config import get_settings
@@ -14,6 +15,12 @@ from core.database import get_db
 from models.domain import FamilyMember, Invoice, InvoiceStatus, User
 from schemas.payload import InvoiceCreate, InvoiceRead, InvoiceStatusUpdate
 from workers.tasks import run_ocr, submit_to_merkur
+
+_TERMINAL_STATUSES = {
+    InvoiceStatus.COMPLETED,
+    InvoiceStatus.MERKUR_REIMBURSED,
+    InvoiceStatus.MERKUR_REJECTED,
+}
 
 settings = get_settings()
 
@@ -101,14 +108,17 @@ async def list_invoices(
         stmt = stmt.where(Invoice.family_member_id == member_sub)
 
     if status_group == "in_progress":
-        stmt = stmt.where(Invoice.status != InvoiceStatus.COMPLETED)
+        stmt = stmt.where(Invoice.status.notin_(_TERMINAL_STATUSES))
     elif status_group == "completed":
-        stmt = stmt.where(Invoice.status == InvoiceStatus.COMPLETED)
+        stmt = stmt.where(Invoice.status.in_(_TERMINAL_STATUSES))
 
     if search:
         stmt = stmt.where(Invoice.provider_name.ilike(f"%{search}%"))
 
-    stmt = stmt.order_by(Invoice.created_at.desc())
+    stmt = (
+        stmt.options(selectinload(Invoice.merkur_document))
+        .order_by(Invoice.created_at.desc())
+    )
     result = await db.execute(stmt)
     return result.scalars().all()
 
@@ -119,7 +129,11 @@ async def get_invoice(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    invoice = await db.get(Invoice, invoice_id)
+    invoice = await db.scalar(
+        select(Invoice)
+        .where(Invoice.id == invoice_id)
+        .options(selectinload(Invoice.merkur_document))
+    )
     _assert_owned(invoice, current_user.id)
     return invoice
 

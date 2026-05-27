@@ -11,4 +11,5 @@ resources:
   - migrate-job.yaml
   - api-deployment.yaml
   - worker-deployment.yaml
+  - beat-deployment.yaml
   - ingress.yaml

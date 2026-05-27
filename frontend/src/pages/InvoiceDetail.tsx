@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { Send } from "lucide-react";
+import { Send, CheckCircle, XCircle } from "lucide-react";
 import { getInvoice, submitToMerkur } from "../api";
 import type { Invoice } from "../api";
 import { useAppContext } from "../state/AppContext";
@@ -35,7 +35,8 @@ export function InvoiceDetail() {
       try {
         const data = await getInvoice(id!);
         if (active) setInvoice(data);
-        if (active && (data.status === "RECEIVED" || data.status === "OCR_PROCESSING")) {
+        const polling = data.status === "RECEIVED" || data.status === "OCR_PROCESSING";
+        if (active && polling) {
           setTimeout(load, 3000);
         }
       } catch {
@@ -90,6 +91,42 @@ export function InvoiceDetail() {
           <Row label="Hochgeladen am" value={formatDate(invoice.created_at)} />
         </div>
       </KCCard>
+
+      {/* Merkur result card */}
+      {(invoice.status === "MERKUR_REIMBURSED" || invoice.status === "MERKUR_REJECTED") && (
+        <KCCard>
+          <div className={`flex items-center gap-3 px-4 py-3 rounded-t-lg border-b border-kc-borderLight ${
+            invoice.status === "MERKUR_REIMBURSED" ? "bg-green-50" : "bg-red-50"
+          }`}>
+            {invoice.status === "MERKUR_REIMBURSED" ? (
+              <CheckCircle size={20} className="text-green-600 shrink-0" />
+            ) : (
+              <XCircle size={20} className="text-red-600 shrink-0" />
+            )}
+            <span className={`text-[14px] font-semibold ${
+              invoice.status === "MERKUR_REIMBURSED" ? "text-green-700" : "text-red-700"
+            }`}>
+              {invoice.status === "MERKUR_REIMBURSED" ? "Merkur hat erstattet" : "Merkur hat abgelehnt"}
+            </span>
+          </div>
+          {invoice.status === "MERKUR_REIMBURSED" && invoice.reimbursed_amount != null && (
+            <div className="flex items-center justify-between px-4 py-3">
+              <span className="text-[13px] text-kc-textSec">Erstattungsbetrag</span>
+              <span className="text-[18px] font-bold text-green-700">
+                {formatEUR(invoice.reimbursed_amount)}
+              </span>
+            </div>
+          )}
+          {invoice.amount != null && invoice.reimbursed_amount != null && (
+            <div className="flex items-center justify-between px-4 py-2 border-t border-kc-borderLight">
+              <span className="text-[13px] text-kc-textSec">Eigenanteil</span>
+              <span className="text-[14px] font-medium text-kc-textSec">
+                {formatEUR(invoice.amount - invoice.reimbursed_amount)}
+              </span>
+            </div>
+          )}
+        </KCCard>
+      )}
 
       {/* Merkur submit CTA */}
       {(invoice.status === "OEGK_REFUNDED" || invoice.status === "READY_FOR_MERKUR") && (

@@ -20,7 +20,28 @@ _MERKUR_USER_DATA_DIR = Path(settings.storage_root) / ".merkur_browser_session"
 _OEGK_USER_DATA_DIR = Path(settings.storage_root) / ".oegk_browser_session"
 _MERKUR_PORTAL_URL = "https://portal.merkur.at/"
 _MERKUR_FORM_URL = "https://portal.merkur.at/de/leistungseinreichung"
+_MERKUR_INBOX_URL = "https://portal.merkur.at/portal/inbox.html#/inbox"
 _OEGK_PORTAL_URL = "https://www.oegk.at/kundenportal"
+
+# ---------------------------------------------------------------------------
+# Inbox DOM selectors — confirmed by calibrate_merkur_inbox.py (2026-05-22)
+# ---------------------------------------------------------------------------
+# "Zur Einreichung" button only appears on Ambulante Abrechnungsinformation rows
+_INBOX_DOWNLOAD_BTN_SELECTOR = "button[aria-label='Zur Einreichung']"
+# Date paragraph within a row (id="documentDatum_N")
+_INBOX_DATE_SELECTOR = "p[id^='documentDatum']"
+# Year group accordion header — ng-click="inbox.togglePanel(groupDate)"
+_INBOX_YEAR_HEADER_SELECTOR = "div.subheader-hover[tabindex='0']"
+# Notification popup dismiss button ("Benachrichtigungen aktivieren?")
+_INBOX_NOTIFICATION_DISMISS = "button[ng-click*='deactivate'], button.md-button[ng-click*='close'], md-dialog button:first-of-type"
+
+# ---------------------------------------------------------------------------
+# Summary SPA selectors — kporclient/einreichungen?gevoid=...
+# ---------------------------------------------------------------------------
+# URL fragment that identifies the summary SPA (vs. the submission form)
+_SUMMARY_URL_FRAGMENT = "kporclient/einreichungen"
+# Optional: download the Abrechnung PDF from the summary page
+_ABRECHNUNG_DOWNLOAD_BTN = "button:has-text('ABRECHNUNG HERUNTERLADEN')"
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +314,276 @@ class MerkurBot:
 
         body = (await form_page.text_content("body") or "").lower()
         return "erfolgreich" in body or "eingereicht" in body or "hochladen" in body
+
+
+    async def download_inbox_documents(
+        self,
+        output_dir: str,
+        *,
+        full_history: bool = False,
+    ) -> list[dict]:
+        """Download all 'Ambulante Abrechnungsinformation' PDFs from the Merkur Postfach.
+
+        Returns a list of dicts: {title, list_date, pdf_path} for each downloaded document.
+
+        Selectors in this method are provisional — run scripts/calibrate_merkur_inbox.py
+        against the live portal and update the _INBOX_* constants at the top of this file.
+        """
+        _MERKUR_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        output = Path(output_dir)
+        output.mkdir(parents=True, exist_ok=True)
+
+        downloaded: list[dict] = []
+
+        async with async_playwright() as pw:
+            context: BrowserContext = await pw.chromium.launch_persistent_context(
+                str(_MERKUR_USER_DATA_DIR),
+                headless=True,
+                accept_downloads=True,
+            )
+            page = context.pages[0] if context.pages else await context.new_page()
+            try:
+                await page.goto(_MERKUR_INBOX_URL, wait_until="networkidle")
+                await self._dismiss_cookie_banner(page)
+                await self._ensure_logged_in(page, fallback_url=_MERKUR_INBOX_URL)
+                await page.wait_for_load_state("networkidle")
+                await self._dismiss_notification_popup(page)
+
+                # Wait for the AngularJS inbox to finish rendering its list items.
+                # In a fresh (cookie-less) session the SPA makes additional API calls
+                # after networkidle; give it up to 20 s before proceeding.
+                try:
+                    await page.wait_for_selector(
+                        "md-list-item", timeout=20_000
+                    )
+                except Exception:
+                    print("[MerkurBot] Inbox list items did not appear — inbox may be empty", flush=True)
+
+                if full_history:
+                    await self._expand_all_years(page)
+                    # Extra settle time after expanding year groups
+                    await page.wait_for_timeout(2_000)
+
+                downloaded = await self._collect_documents(page, output)
+            finally:
+                await context.close()
+
+        return downloaded
+
+    async def _prime_kporclient_session(self, page: Page) -> None:
+        """Navigate to the kporclient SPA once to establish its OAuth session.
+
+        The kporclient SPA runs its own OAuth2 flow independent of the Liferay
+        portal session.  Visiting its base URL on a fresh persistent context
+        triggers a login redirect; once we log in here the session token is stored
+        in the browser context and subsequent gevoid-specific navigations land
+        on the correct page without being redirected to login.
+        """
+        kporclient_base = "https://portal.merkur.at/kporclient/einreichungen"
+        try:
+            await page.goto(kporclient_base, wait_until="domcontentloaded", timeout=20_000)
+        except Exception:
+            await page.wait_for_timeout(1_000)
+        await self._ensure_logged_in(page, fallback_url=kporclient_base)
+        await page.wait_for_load_state("networkidle", timeout=20_000)
+        print(f"[MerkurBot] kporclient session primed (url={page.url})", flush=True)
+
+    async def _dismiss_notification_popup(self, page: Page) -> None:
+        """Dismiss the 'Benachrichtigungen aktivieren?' dialog if it appears."""
+        try:
+            # Wait briefly for the dialog to appear
+            await page.wait_for_timeout(1_000)
+            for sel in _INBOX_NOTIFICATION_DISMISS.split(", "):
+                try:
+                    btn = page.locator(sel.strip())
+                    if await btn.count() > 0 and await btn.first.is_visible():
+                        await btn.first.click()
+                        await page.wait_for_timeout(500)
+                        return
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    async def _expand_all_years(self, page: Page) -> None:
+        """Click all collapsed year accordion headers to expose archived documents."""
+        year_headers = await page.query_selector_all(_INBOX_YEAR_HEADER_SELECTOR)
+        for header in year_headers:
+            try:
+                rect = await header.bounding_box()
+                if rect and rect["width"] > 0:
+                    await header.click()
+                    await page.wait_for_timeout(600)
+            except Exception:
+                continue
+
+    async def _collect_documents(
+        self, page: Page, output_dir: Path
+    ) -> list[dict]:
+        """Enumerate inbox rows and scrape summary data for each Einreichung.
+
+        Clicking 'Zur Einreichung' navigates the current page away from the inbox,
+        so instead we extract the geVoId from the AngularJS scope and open each
+        summary URL directly in a fresh tab — leaving the inbox page intact.
+
+        Falls back to a click+navigate approach if the AngularJS scope is not
+        accessible (e.g. in a non-AngularJS context or after SPA update).
+        """
+        from services.merkur_summary_scraper import parse_einreichung_text
+
+        results: list[dict] = []
+        seen_geschaeftsfaelle: set[str] = set()
+
+        print(f"[MerkurBot] Inbox page URL: {page.url}", flush=True)
+
+        # Extract gevoid + display metadata from AngularJS scope for all rows at once,
+        # before navigating anywhere.  The inbox is an AngularJS (1.x) app so
+        # angular.element().scope() is always available on the inbox page.
+        raw_items: list[dict] = await page.evaluate("""() => {
+            const btns = document.querySelectorAll("button[aria-label='Zur Einreichung']");
+            return [...btns].map(btn => {
+                const row = btn.closest('md-list-item');
+                let gevoid = null;
+                if (typeof angular !== 'undefined') {
+                    try {
+                        gevoid = angular.element(row).scope()?.item?.geVoId ?? null;
+                    } catch (_) {}
+                }
+                const label = row?.querySelector('button.md-no-style')
+                    ?.getAttribute('aria-label') || '';
+                const title = label.split('\\n')[0].trim();
+                const dateEl = row?.querySelector('p[id^="documentDatum"]');
+                return {
+                    gevoid,
+                    title: title || 'Ambulante Abrechnungsinformation VN',
+                    date: dateEl?.textContent?.trim() || '',
+                };
+            });
+        }""")
+
+        # Dedup gevoids — the inbox renders the same document in multiple sections
+        # (e.g. unread + a year group), so the same gevoid can appear several times.
+        seen_gevoids: set = set()
+        deduped_items = []
+        for it in raw_items:
+            gv = it.get("gevoid")
+            if gv and gv not in seen_gevoids:
+                seen_gevoids.add(gv)
+                deduped_items.append(it)
+            elif not gv:
+                deduped_items.append(it)
+        raw_items = deduped_items
+
+        print(f"[MerkurBot] Found {len(raw_items)} unique gevoid(s) in inbox", flush=True)
+
+        if not raw_items:
+            return results
+
+        # Prime the kporclient SPA session NOW — after we have all gevoids.
+        # Priming navigates away from the inbox, so it must happen AFTER gevoid
+        # extraction.  Once primed the kporclient OAuth token is stored in the
+        # browser context and subsequent gevoid navigations land on the correct
+        # page without being redirected to login.
+        await self._prime_kporclient_session(page)
+
+        for item in raw_items:
+            title = item.get("title", "Ambulante Abrechnungsinformation VN")
+            list_date = item.get("date", "")
+            gevoid = item.get("gevoid")
+
+            panels_text: list[str] = []
+
+            if not gevoid:
+                print(f"[MerkurBot] No gevoid for '{title}' — skipping", flush=True)
+                continue
+
+            # Navigate the existing page to the summary URL rather than opening a new
+            # tab.  A fresh tab doesn't carry the kporclient SPA session and aborts;
+            # the current page already has authenticated cookies for the Liferay portal
+            # and the kporclient SPA shares that session.
+            summary_url = (
+                f"https://portal.merkur.at/kporclient/einreichungen?gevoid={gevoid}"
+            )
+            try:
+                # domcontentloaded avoids ERR_ABORTED from immediate JS redirects
+                try:
+                    await page.goto(summary_url, wait_until="domcontentloaded", timeout=20_000)
+                except Exception:
+                    await page.wait_for_timeout(1_000)
+                await self._ensure_logged_in(page, fallback_url=summary_url)
+                await page.wait_for_load_state("networkidle", timeout=20_000)
+                # If OAuth redirected us away from the gevoid URL, navigate back now
+                # that the kporclient session is established.
+                if f"gevoid={gevoid}" not in page.url:
+                    await page.goto(summary_url, wait_until="networkidle", timeout=20_000)
+                panels_text = await self._scrape_summary_page(page)
+                print(
+                    f"[MerkurBot] gevoid={gevoid}: {len(panels_text)} panel(s) scraped",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    f"[MerkurBot] Summary page failed (gevoid={gevoid}): {exc}",
+                    flush=True,
+                )
+                continue
+
+            for panel_text in panels_text:
+                parsed = parse_einreichung_text(panel_text)
+                if not parsed:
+                    continue
+                if parsed.geschaeftsfall_nr in seen_geschaeftsfaelle:
+                    continue
+                seen_geschaeftsfaelle.add(parsed.geschaeftsfall_nr)
+                results.append({
+                    "title": title,
+                    "list_date": list_date,
+                    "geschaeftsfall_nr": parsed.geschaeftsfall_nr,
+                    "document_date": parsed.document_date,
+                    "patient_name": parsed.patient_name,
+                    "invoice_date": parsed.invoice_date,
+                    "invoice_amount": parsed.invoice_amount,
+                    "reimbursed_amount": parsed.reimbursed_amount,
+                    "result_state": parsed.result_state,
+                    "raw_text": parsed.raw_text,
+                    "pdf_path": None,
+                })
+
+        return results
+
+    async def _scrape_summary_page(self, page: Page) -> list[str]:
+        """Return the innerText of each Einreichung panel on the summary SPA.
+
+        Expands all collapsed Angular Material expansion panels first so that
+        the Geschäftsfallnummer and line-item details are visible.
+        """
+        await page.wait_for_load_state("networkidle")
+        await page.wait_for_timeout(2_000)
+
+        # Expand all collapsed panels (Angular Material aria-expanded attribute)
+        await page.evaluate("""() => {
+            for (const h of document.querySelectorAll(
+                'mat-expansion-panel-header[aria-expanded="false"], '
+                + 'mat-expansion-panel-header:not([aria-expanded="true"])'
+            )) {
+                try { h.click(); } catch (_) {}
+            }
+        }""")
+        await page.wait_for_timeout(1_000)
+
+        # Collect text per panel.  Use textContent (not innerText) so that collapsed
+        # panel bodies are included — innerText respects display:none and returns
+        # empty string for hidden Angular Material expansion panel content.
+        panels: list[str] = await page.evaluate("""() => {
+            const els = document.querySelectorAll('mat-expansion-panel');
+            if (els.length > 0) {
+                return [...els].map(el => el.textContent || '');
+            }
+            // Fallback: whole page text if Angular component tags aren't in DOM
+            return [document.body.textContent || ''];
+        }""")
+
+        return [t for t in panels if t.strip()]
 
 
 # ---------------------------------------------------------------------------
