@@ -97,7 +97,7 @@ async def list_invoices(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    from sqlalchemy import and_, ilike_op, or_
+    from sqlalchemy import and_, or_
     stmt = select(Invoice).where(Invoice.user_id == current_user.id)
 
     if member_key:
