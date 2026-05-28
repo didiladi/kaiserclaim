@@ -5,7 +5,9 @@ namespace: kaiserclaim
 
 resources:
   - namespace.yaml
-  - secret.yaml
+  # secret.yaml is NOT included — apply the real secret once with:
+  #   kubectl create secret generic kaiserclaim-secrets --from-env-file=.env \
+  #     -n kaiserclaim --dry-run=client -o yaml | kubectl apply -f -
   - pvc.yaml
   - redis.yaml
   - migrate-job.yaml
