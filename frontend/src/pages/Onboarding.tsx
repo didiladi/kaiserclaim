@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { CheckCircle, CreditCard, User } from "lucide-react";
 import { DropZone } from "../components/DropZone";
@@ -86,6 +86,25 @@ function BenefitRow({ benefit }: { benefit: BenefitRuleDetail }) {
   );
 }
 
+const PARSE_STAGES = [
+  { label: "Dokument wird eingelesen…",          until: 15 },
+  { label: "Text wird extrahiert…",              until: 30 },
+  { label: "KI analysiert versicherte Personen…", until: 60 },
+  { label: "KI analysiert Leistungen…",          until: 100 },
+  { label: "Ergebnisse werden gespeichert…",     until: Infinity },
+];
+
+function useParseStage(parsing: boolean) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (!parsing) { setElapsed(0); return; }
+    const t = setInterval(() => setElapsed((e) => e + 1), 1000);
+    return () => clearInterval(t);
+  }, [parsing]);
+  const stage = PARSE_STAGES.find((s) => elapsed < s.until) ?? PARSE_STAGES[PARSE_STAGES.length - 1];
+  return { label: stage.label, elapsed };
+}
+
 export function Onboarding() {
   const navigate = useNavigate();
   const [step, setStep] = useState(1);
@@ -97,6 +116,7 @@ export function Onboarding() {
   const [parseProgress, setParseProgress] = useState(0);
   const [coverage, setCoverage] = useState<ContractCoverage | null>(null);
   const [saving, setSaving] = useState(false);
+  const { label: parseStageLabel, elapsed: parseElapsed } = useParseStage(parsing);
 
   const handleStep1 = async () => {
     const contract = await createContract({ provider_name: provider, policy_number: policyNumber || undefined });
@@ -108,7 +128,8 @@ export function Onboarding() {
     if (!pdfFile || !contractId) return;
     setParsing(true);
     setParseProgress(0);
-    const interval = setInterval(() => setParseProgress((p) => Math.min(p + 5, 95)), 130);
+    // Slow crawl to 90% over ~110s so the bar keeps moving for the full Gemini extraction
+    const interval = setInterval(() => setParseProgress((p) => Math.min(p + 90 / 110, 90)), 1000);
     try {
       const result = await parseContractPdf(contractId, pdfFile);
       clearInterval(interval);
@@ -172,14 +193,18 @@ export function Onboarding() {
             <div className="p-4 bg-kc-surfaceAlt rounded-lg text-[14px] text-kc-text">{pdfFile.name}</div>
           )}
           {parsing && (
-            <div className="space-y-2">
-              <div className="flex items-center gap-2 text-[13px] text-kc-textSec">
-                <div className="w-4 h-4 border-2 border-kc-accent border-t-transparent rounded-full animate-kcSpin" />
-                Vertrag wird analysiert…
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-[13px] text-kc-textSec">
+                  <div className="w-4 h-4 border-2 border-kc-accent border-t-transparent rounded-full animate-kcSpin flex-shrink-0" />
+                  <span>{parseStageLabel}</span>
+                </div>
+                <span className="text-[12px] text-kc-textSec tabular-nums">{parseElapsed}s</span>
               </div>
               <div className="h-1.5 rounded-full bg-kc-surfaceAlt overflow-hidden">
-                <div className="h-full bg-kc-accent rounded-full transition-all duration-300" style={{ width: `${parseProgress}%` }} />
+                <div className="h-full bg-kc-accent rounded-full transition-all duration-1000" style={{ width: `${parseProgress}%` }} />
               </div>
+              <p className="text-[11px] text-kc-textSec text-center">KI-Analyse dauert ca. 1–2 Minuten</p>
             </div>
           )}
           <Button fullWidth size="lg" disabled={!pdfFile || parsing} loading={parsing} onClick={handleParse}>
