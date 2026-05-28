@@ -22,6 +22,19 @@ class LimitType(str, enum.Enum):
     BIANNUAL = "BIANNUAL"
 
 
+class ResetPeriod(str, enum.Enum):
+    CALENDAR_YEAR = "CALENDAR_YEAR"
+    INSURANCE_YEAR = "INSURANCE_YEAR"
+    PER_EVENT = "PER_EVENT"
+    ONCE_PER_YEAR = "ONCE_PER_YEAR"
+
+
+class BenefitKind(str, enum.Enum):
+    BUDGET = "BUDGET"
+    PROGRAM = "PROGRAM"
+    DEDUCTIBLE = "DEDUCTIBLE"
+
+
 class InvoiceStatus(str, enum.Enum):
     RECEIVED = "RECEIVED"
     OCR_PROCESSING = "OCR_PROCESSING"
@@ -84,7 +97,37 @@ class InsuranceContract(Base):
 
     user = relationship("User", back_populates="contracts")
     benefit_rules = relationship("BenefitRule", back_populates="contract", cascade="all, delete-orphan")
+    insured_persons = relationship("InsuredPerson", back_populates="contract", cascade="all, delete-orphan")
 
+
+
+class InsuredPerson(Base):
+    __tablename__ = "insured_persons"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    contract_id = Column(UUID(as_uuid=True), ForeignKey("insurance_contracts.id", ondelete="CASCADE"), nullable=False, index=True)
+    family_member_id = Column(UUID(as_uuid=True), ForeignKey("family_members.id", ondelete="SET NULL"), nullable=True)
+    full_name = Column(String, nullable=False)
+    kd_nr = Column(String, nullable=True)
+    birth_date = Column(DateTime(timezone=True), nullable=True)
+
+    contract = relationship("InsuranceContract", back_populates="insured_persons")
+    family_member = relationship("FamilyMember")
+    tariffs = relationship("Tariff", back_populates="insured_person", cascade="all, delete-orphan")
+
+
+class Tariff(Base):
+    __tablename__ = "tariffs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    insured_person_id = Column(UUID(as_uuid=True), ForeignKey("insured_persons.id", ondelete="CASCADE"), nullable=False, index=True)
+    code = Column(String, nullable=False)            # e.g. "MHNG1E25S1"
+    name = Column(String, nullable=True)             # e.g. "NOVUM SMART"
+    description_raw = Column(Text, nullable=True)
+    program_info = Column(Text, nullable=True)        # web-enriched (Phase 1.5)
+
+    insured_person = relationship("InsuredPerson", back_populates="tariffs")
+    benefit_rules = relationship("BenefitRule", back_populates="tariff", cascade="all, delete-orphan")
 
 
 class BenefitRule(Base):
@@ -92,12 +135,20 @@ class BenefitRule(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     contract_id = Column(UUID(as_uuid=True), ForeignKey("insurance_contracts.id", ondelete="CASCADE"), nullable=False, index=True)
-    benefit_name = Column(String, nullable=False)        # e.g. "Zahnreinigung"
-    limit_amount = Column(Float, nullable=False)         # e.g. 150.0
-    limit_type = Column(SAEnum(LimitType), nullable=False)
+    # Per-person linkage (null for legacy contract-level benefits)
+    tariff_id = Column(UUID(as_uuid=True), ForeignKey("tariffs.id", ondelete="CASCADE"), nullable=True, index=True)
+    benefit_name = Column(String, nullable=False)            # e.g. "Zahnreinigung"
+    benefit_kind = Column(SAEnum(BenefitKind, name="benefitkind", create_type=False), nullable=True)
+    limit_amount = Column(Float, nullable=True)              # null for PROGRAM benefits
+    limit_type = Column(SAEnum(LimitType), nullable=True)    # legacy field; use reset_period for new records
+    reset_period = Column(SAEnum(ResetPeriod, name="resetperiod", create_type=False), nullable=True)
     reset_date = Column(DateTime(timezone=True), nullable=True)  # next quota reset
+    reimbursement_pct = Column(Float, nullable=True)         # e.g. 80.0 (percent)
+    category = Column(String, nullable=True)                 # maps to BENEFIT_CATEGORIES token keys
+    notes = Column(Text, nullable=True)
 
     contract = relationship("InsuranceContract", back_populates="benefit_rules")
+    tariff = relationship("Tariff", back_populates="benefit_rules")
     usages = relationship("BenefitUsage", back_populates="benefit_rule", cascade="all, delete-orphan")
 
 

@@ -89,7 +89,22 @@ export function Home() {
         </Button>
       </div>
 
-      {/* Benefit alerts */}
+      {/* Unused benefit reminders — "use it or lose it" */}
+      {(summary?.unused_alerts ?? []).map((alert) => (
+        <div key={`${alert.benefit_name}-${alert.person_name}`} className="mx-5 mb-3 flex items-start gap-3 p-3.5 rounded-lg" style={{ background: "#F0FDF4" }}>
+          <AlertCircle size={18} className="text-green-600 flex-shrink-0 mt-0.5" />
+          <p className="text-[13px] text-green-800">
+            <span className="font-semibold">{alert.benefit_name}</span>
+            {alert.person_name && <span className="text-green-700"> ({alert.person_name.split(" ")[0]})</span>}
+            {" "}— noch {alert.days_until_reset} Tage bis zum Reset
+            {alert.limit != null && (
+              <span className="text-green-700"> · bis zu {new Intl.NumberFormat("de-AT", { style: "currency", currency: "EUR" }).format(alert.limit)} verfügbar</span>
+            )}
+          </p>
+        </div>
+      ))}
+
+      {/* Benefit alerts — nearly exhausted */}
       {(summary?.benefit_alerts ?? []).map((alert) => (
         <div key={alert.benefit_name} className="mx-5 mb-4 flex items-start gap-3 p-3.5 rounded-lg" style={{ background: "#FFF7ED" }}>
           <AlertCircle size={18} className="text-amber-500 flex-shrink-0 mt-0.5" />

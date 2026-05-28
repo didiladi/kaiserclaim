@@ -14,8 +14,8 @@ from celery.schedules import crontab
 
 from core.config import get_settings
 from core.database import AsyncSessionLocal
-from models.domain import BenefitUsage, Invoice, InvoiceStatus, MerkurDocument, MerkurResultState, User
-from sqlalchemy import select
+from models.domain import BenefitKind, BenefitRule, BenefitUsage, InsuredPerson, Invoice, InvoiceStatus, MerkurDocument, MerkurResultState, ResetPeriod, Tariff, User
+from sqlalchemy import func, select
 from services.ocr_engine import pdf_to_text
 from services.regex_parser import parse_pharmacy_receipt
 from services.rksv_parser import extract_rksv_from_image
@@ -40,6 +40,10 @@ celery_app.conf.beat_schedule = {
         "task": "workers.tasks.sync_merkur_inbox",
         "schedule": crontab(hour=7, minute=0),
         "kwargs": {"full_history": False},
+    },
+    "scan-unused-benefits-daily": {
+        "task": "workers.tasks.scan_unused_benefits",
+        "schedule": crontab(hour=8, minute=0),
     },
 }
 
@@ -345,6 +349,90 @@ async def _link_and_finalize(merkur_doc_id, invoice: Invoice, result_state: Merk
             # UNKNOWN: leave in MERKUR_SUBMITTED
 
         await db.commit()
+
+
+@celery_app.task
+def scan_unused_benefits() -> dict:
+    """
+    Daily scan for under-used yearly/once-per-year BUDGET/PROGRAM benefits
+    whose reset date is within 8 weeks.  Results are served at query time via
+    /dashboard/summary — this task is a no-op stub that triggers the logic
+    on demand so it can also be called manually for testing.
+    """
+    return _run(_scan_unused_benefits_async())
+
+
+_UNUSED_LEAD_DAYS = 56
+_YEARLY_RESET_PERIODS = {ResetPeriod.CALENDAR_YEAR, ResetPeriod.ONCE_PER_YEAR, ResetPeriod.INSURANCE_YEAR}
+
+
+async def _scan_unused_benefits_async() -> dict:
+    """
+    Iterate all per-person BUDGET/PROGRAM benefits with yearly resets.
+    Log any reminders that should fire within the lead window.
+    The dashboard endpoint computes the same logic at query time; this task
+    can be extended later to push notifications or store a reminder model.
+    """
+    from datetime import date
+
+    today = date.today()
+    current_year = today.year
+    reminder_count = 0
+
+    async with AsyncSessionLocal() as db:
+        rules_result = await db.execute(
+            select(BenefitRule).where(
+                BenefitRule.reset_period.in_([p.value for p in _YEARLY_RESET_PERIODS]),
+                BenefitRule.benefit_kind.in_([BenefitKind.BUDGET.value, BenefitKind.PROGRAM.value]),
+            )
+        )
+        rules = rules_result.scalars().all()
+
+        # Pre-fetch person names
+        person_names: dict[str, str] = {}
+        persons_result = await db.execute(
+            select(InsuredPerson, Tariff)
+            .join(Tariff, Tariff.insured_person_id == InsuredPerson.id)
+        )
+        for person, tariff in persons_result:
+            person_names[str(tariff.id)] = person.full_name
+
+        for rule in rules:
+            if rule.reset_period in (ResetPeriod.CALENDAR_YEAR, ResetPeriod.ONCE_PER_YEAR):
+                reset_date = date(current_year, 12, 31)
+            elif rule.reset_period == ResetPeriod.INSURANCE_YEAR:
+                candidate = date(current_year, 10, 1)
+                reset_date = candidate if candidate >= today else date(current_year + 1, 10, 1)
+            else:
+                continue
+
+            days_until = (reset_date - today).days
+            if days_until < 0 or days_until > _UNUSED_LEAD_DAYS:
+                continue
+
+            used_result = await db.execute(
+                select(func.coalesce(func.sum(BenefitUsage.amount_used), 0.0)).where(
+                    BenefitUsage.benefit_rule_id == rule.id
+                )
+            )
+            used = float(used_result.scalar() or 0.0)
+
+            if rule.benefit_kind == BenefitKind.PROGRAM:
+                should_alert = used == 0
+            else:
+                pct_used = (used / rule.limit_amount * 100) if rule.limit_amount else 100
+                should_alert = pct_used < 30
+
+            if should_alert:
+                person_name = person_names.get(str(rule.tariff_id), "unbekannt")
+                print(
+                    f"[scan_unused_benefits] REMINDER: {rule.benefit_name}"
+                    f" ({person_name}) — {days_until}d until reset ({reset_date})",
+                    flush=True,
+                )
+                reminder_count += 1
+
+    return {"reminders_due": reminder_count}
 
 
 @celery_app.task(bind=True, max_retries=10, default_retry_delay=600)

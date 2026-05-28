@@ -71,11 +71,63 @@ export interface BenefitRule {
   id: string;
   contract_id: string;
   benefit_name: string;
-  limit_amount: number;
-  limit_type: "YEARLY" | "BIANNUAL";
+  limit_amount: number | null;
+  limit_type: "YEARLY" | "BIANNUAL" | null;
   reset_date: string | null;
   amount_used: number;
-  amount_remaining: number;
+  amount_remaining: number | null;
+}
+
+export type BenefitKind = "BUDGET" | "PROGRAM" | "DEDUCTIBLE";
+export type ResetPeriod = "CALENDAR_YEAR" | "INSURANCE_YEAR" | "PER_EVENT" | "ONCE_PER_YEAR";
+
+export interface BenefitRuleDetail {
+  id: string;
+  contract_id: string;
+  tariff_id: string | null;
+  benefit_name: string;
+  benefit_kind: BenefitKind | null;
+  limit_amount: number | null;
+  reimbursement_pct: number | null;
+  reset_period: ResetPeriod | null;
+  category: string | null;
+  notes: string | null;
+  amount_used: number;
+  amount_remaining: number | null;
+}
+
+export interface TariffRead {
+  id: string;
+  insured_person_id: string;
+  code: string;
+  name: string | null;
+  description_raw: string | null;
+  program_info: string | null;
+  benefits: BenefitRuleDetail[];
+}
+
+export interface InsuredPersonRead {
+  id: string;
+  contract_id: string;
+  family_member_id: string | null;
+  full_name: string;
+  kd_nr: string | null;
+  birth_date: string | null;
+  tariffs: TariffRead[];
+}
+
+export interface ContractCoverage {
+  contract_id: string;
+  insured_persons: InsuredPersonRead[];
+}
+
+export interface UnusedAlert {
+  benefit_name: string;
+  person_name: string | null;
+  pct_unused: number;
+  limit: number | null;
+  days_until_reset: number;
+  reset_date: string;
 }
 
 export interface DashboardSummary {
@@ -85,6 +137,7 @@ export interface DashboardSummary {
   in_progress_count: number;
   eigenanteil: number;
   benefit_alerts: { benefit_name: string; percent_used: number; used: number; limit: number }[];
+  unused_alerts: UnusedAlert[];
 }
 
 export interface MonthlyStats {
@@ -177,6 +230,10 @@ export function getBenefits(contractId: string): Promise<BenefitRule[]> {
   return apiFetch<BenefitRule[]>(`/contracts/${contractId}/benefits`);
 }
 
+export function getCoverage(contractId: string): Promise<ContractCoverage> {
+  return apiFetch<ContractCoverage>(`/contracts/${contractId}/coverage`);
+}
+
 export async function createContract(data: { provider_name: string; policy_number?: string }): Promise<Contract> {
   return apiFetch<Contract>("/contracts/", {
     method: "POST",
@@ -185,7 +242,7 @@ export async function createContract(data: { provider_name: string; policy_numbe
   });
 }
 
-export async function parseContractPdf(contractId: string, file: File): Promise<BenefitRule[]> {
+export async function parseContractPdf(contractId: string, file: File): Promise<ContractCoverage> {
   const form = new FormData();
   form.append("file", file);
   const res = await fetch(`${BASE}/contracts/${contractId}/parse-pdf?user_id=${USER_ID}`, {
@@ -193,7 +250,7 @@ export async function parseContractPdf(contractId: string, file: File): Promise<
     body: form,
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json() as Promise<BenefitRule[]>;
+  return res.json() as Promise<ContractCoverage>;
 }
 
 // ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_current_user
 from core.database import get_db
-from models.domain import BenefitRule, BenefitUsage, FamilyMember, Invoice, InvoiceStatus, User
+from models.domain import BenefitKind, BenefitRule, BenefitUsage, FamilyMember, InsuredPerson, Invoice, InvoiceStatus, ResetPeriod, Tariff, User
 
 router = APIRouter(tags=["stats"])
 
@@ -59,14 +59,15 @@ async def dashboard_summary(
     in_progress_count = sum(1 for i in invoices if i.status != InvoiceStatus.COMPLETED)
     eigenanteil = total_paid - total_reimbursed
 
-    # Benefit alerts: find rules where usage >= 75% of limit
+    # Benefit alerts: find rules where usage >= 75% of limit (nearly used up)
     benefit_alerts = []
     all_rules_result = await db.execute(
         select(BenefitRule).join(BenefitRule.contract).where(
             BenefitRule.contract.has(user_id=current_user.id)
         )
     )
-    for rule in all_rules_result.scalars().all():
+    all_rules = all_rules_result.scalars().all()
+    for rule in all_rules:
         used_result = await db.execute(
             select(func.coalesce(func.sum(BenefitUsage.amount_used), 0)).where(
                 BenefitUsage.benefit_rule_id == rule.id
@@ -82,6 +83,10 @@ async def dashboard_summary(
                 "limit": rule.limit_amount,
             })
 
+    # Unused alerts: find yearly BUDGET/PROGRAM benefits that are under-used
+    # and whose reset date is within the lead window (8 weeks = 56 days).
+    unused_alerts = await _compute_unused_alerts(db, current_user.id, all_rules)
+
     return {
         "year": year,
         "total_paid": round(total_paid, 2),
@@ -89,7 +94,91 @@ async def dashboard_summary(
         "in_progress_count": in_progress_count,
         "eigenanteil": round(eigenanteil, 2),
         "benefit_alerts": benefit_alerts,
+        "unused_alerts": unused_alerts,
     }
+
+
+_YEARLY_RESET_PERIODS = {ResetPeriod.CALENDAR_YEAR, ResetPeriod.ONCE_PER_YEAR, ResetPeriod.INSURANCE_YEAR}
+_UNUSED_LEAD_DAYS = 56  # 8 weeks before reset → start showing reminders
+
+
+async def _compute_unused_alerts(db, user_id, all_rules: list) -> list[dict]:
+    """
+    For each yearly BUDGET or PROGRAM benefit: if it's unused (or < 30% used)
+    and the next reset is within _UNUSED_LEAD_DAYS days, surface a reminder.
+    """
+    from datetime import date, datetime, timezone, timedelta
+
+    today = date.today()
+    current_year = today.year
+    alerts = []
+
+    # Pre-load insured person names keyed by contract_id → tariff_id → person name
+    person_names: dict[str, str] = {}  # tariff_id → person full_name
+    persons_result = await db.execute(
+        select(InsuredPerson, Tariff)
+        .join(Tariff, Tariff.insured_person_id == InsuredPerson.id)
+    )
+    for person, tariff in persons_result:
+        person_names[str(tariff.id)] = person.full_name
+
+    for rule in all_rules:
+        # Only yearly/once-per-year BUDGET or PROGRAM benefits
+        if rule.reset_period not in _YEARLY_RESET_PERIODS:
+            continue
+        if rule.benefit_kind not in (BenefitKind.BUDGET, BenefitKind.PROGRAM, None):
+            continue
+        # Skip DEDUCTIBLE
+        if rule.benefit_kind == BenefitKind.DEDUCTIBLE:
+            continue
+
+        # Compute reset date for current period
+        if rule.reset_period in (ResetPeriod.CALENDAR_YEAR, ResetPeriod.ONCE_PER_YEAR):
+            reset_date = date(current_year, 12, 31)
+        elif rule.reset_period == ResetPeriod.INSURANCE_YEAR:
+            # Default: October 1 (common for Merkur)
+            candidate = date(current_year, 10, 1)
+            reset_date = candidate if candidate >= today else date(current_year + 1, 10, 1)
+        else:
+            continue
+
+        days_until_reset = (reset_date - today).days
+        if days_until_reset < 0 or days_until_reset > _UNUSED_LEAD_DAYS:
+            continue
+
+        # Compute usage for this rule
+        used_result = await db.execute(
+            select(func.coalesce(func.sum(BenefitUsage.amount_used), 0.0)).where(
+                BenefitUsage.benefit_rule_id == rule.id
+            )
+        )
+        used = float(used_result.scalar() or 0.0)
+
+        if rule.benefit_kind == BenefitKind.PROGRAM:
+            # PROGRAM: alert if never used
+            if used > 0:
+                continue
+            pct_unused = 100.0
+        else:
+            # BUDGET: alert if < 30% used
+            if not rule.limit_amount or rule.limit_amount <= 0:
+                continue
+            pct_used = used / rule.limit_amount * 100
+            if pct_used >= 30:
+                continue
+            pct_unused = round(100.0 - pct_used, 1)
+
+        person_name = person_names.get(str(rule.tariff_id)) if rule.tariff_id else None
+        alerts.append({
+            "benefit_name": rule.benefit_name,
+            "person_name": person_name,
+            "pct_unused": pct_unused,
+            "limit": rule.limit_amount,
+            "days_until_reset": days_until_reset,
+            "reset_date": reset_date.isoformat(),
+        })
+
+    return alerts
 
 
 @router.get("/stats/monthly")

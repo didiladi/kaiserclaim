@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 
 from pydantic import BaseModel, EmailStr, ConfigDict
 
-from models.domain import InvoiceStatus, LimitType, MerkurResultState
+from models.domain import InvoiceStatus, LimitType, MerkurResultState, BenefitKind, ResetPeriod
 
 
 # ---------------------------------------------------------------------------
@@ -75,8 +75,8 @@ class ContractRead(_Base):
 
 class BenefitRuleCreate(BaseModel):
     benefit_name: str
-    limit_amount: float
-    limit_type: LimitType
+    limit_amount: Optional[float] = None
+    limit_type: Optional[LimitType] = None
     reset_date: Optional[datetime] = None
 
 
@@ -84,15 +84,59 @@ class BenefitRuleRead(_Base):
     id: uuid.UUID
     contract_id: uuid.UUID
     benefit_name: str
-    limit_amount: float
-    limit_type: LimitType
+    limit_amount: Optional[float]
+    limit_type: Optional[LimitType]
     reset_date: Optional[datetime]
 
 
 class BenefitRuleWithRemaining(BenefitRuleRead):
     """Augmented view used by the Auditor dashboard — remaining quota is computed at query time."""
     amount_used: float
-    amount_remaining: float
+    amount_remaining: Optional[float]  # null for PROGRAM benefits with no euro cap
+
+
+# ---------------------------------------------------------------------------
+# Per-person coverage (new)
+# ---------------------------------------------------------------------------
+
+class BenefitRuleDetailRead(_Base):
+    id: uuid.UUID
+    contract_id: uuid.UUID
+    tariff_id: Optional[uuid.UUID]
+    benefit_name: str
+    benefit_kind: Optional[BenefitKind]
+    limit_amount: Optional[float]
+    reimbursement_pct: Optional[float]
+    reset_period: Optional[ResetPeriod]
+    category: Optional[str]
+    notes: Optional[str]
+    amount_used: float = 0.0
+    amount_remaining: Optional[float] = None
+
+
+class TariffRead(_Base):
+    id: uuid.UUID
+    insured_person_id: uuid.UUID
+    code: str
+    name: Optional[str]
+    description_raw: Optional[str]
+    program_info: Optional[str]
+    benefits: List[BenefitRuleDetailRead] = []
+
+
+class InsuredPersonRead(_Base):
+    id: uuid.UUID
+    contract_id: uuid.UUID
+    family_member_id: Optional[uuid.UUID]
+    full_name: str
+    kd_nr: Optional[str]
+    birth_date: Optional[datetime]
+    tariffs: List[TariffRead] = []
+
+
+class ContractCoverageRead(BaseModel):
+    contract_id: uuid.UUID
+    insured_persons: List[InsuredPersonRead] = []
 
 
 # ---------------------------------------------------------------------------

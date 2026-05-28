@@ -1,0 +1,18 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kaiserclaim-tls
+  namespace: kaiserclaim
+spec:
+  secretName: kaiserclaim-tls
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - kaiserclaim.home
+  issuerRef:
+    name: home-lab-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

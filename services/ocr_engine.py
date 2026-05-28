@@ -19,6 +19,24 @@ async def pdf_to_text(file_path: str) -> str:
     return text
 
 
+async def pdf_to_text_native(file_path: str, ocr_fallback: bool = True) -> str:
+    """
+    Extract text from a PDF using pdfminer directly (no OCR, instant for digital PDFs).
+    Falls back to full OCR only if the extracted text is too short (scanned document).
+    """
+    loop = asyncio.get_event_loop()
+    text = await loop.run_in_executor(None, _extract_text, Path(file_path))
+
+    # If the PDF already has meaningful text, return it directly
+    if len(text.strip()) > 200:
+        return text
+
+    # Scanned document — fall back to OCR
+    if ocr_fallback:
+        return await pdf_to_text(file_path)
+    return text
+
+
 def _run_ocr(src: Path, dest: Path) -> None:
     ocrmypdf.ocr(
         src,

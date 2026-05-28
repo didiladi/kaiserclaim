@@ -12,4 +12,5 @@ resources:
   - api-deployment.yaml
   - worker-deployment.yaml
   - beat-deployment.yaml
+  - certificate.yaml
   - ingress.yaml

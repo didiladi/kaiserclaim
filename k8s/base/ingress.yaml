@@ -1,8 +1,18 @@
-# Traefik IngressRoute — exposes the app on kaiserclaim.home (via PiHole DNS)
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: kaiserclaim-redirect-https
+  namespace: kaiserclaim
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
-  name: kaiserclaim-ingress
+  name: kaiserclaim-ingress-http
   namespace: kaiserclaim
 spec:
   entryPoints:
@@ -13,3 +23,22 @@ spec:
       services:
         - name: kaiserclaim-api-svc
           port: 80
+      middlewares:
+        - name: kaiserclaim-redirect-https
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: kaiserclaim-ingress
+  namespace: kaiserclaim
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`kaiserclaim.home`)
+      kind: Rule
+      services:
+        - name: kaiserclaim-api-svc
+          port: 80
+  tls:
+    secretName: kaiserclaim-tls
