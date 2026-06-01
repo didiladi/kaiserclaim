@@ -5,8 +5,9 @@ import { DropZone } from "../components/DropZone";
 import { Input } from "../components/Input";
 import { Button } from "../components/Button";
 import { KCCard } from "../components/KCCard";
-import { createContract, parseContractPdf } from "../api";
+import { createContract, parseContractPdf, listFamilyMembers } from "../api";
 import type { ContractCoverage, BenefitRuleDetail } from "../api";
+import { useAppContext } from "../state/AppContext";
 import { formatEUR } from "../lib/format";
 import clsx from "clsx";
 
@@ -107,6 +108,7 @@ function useParseStage(parsing: boolean) {
 
 export function Onboarding() {
   const navigate = useNavigate();
+  const { setFamilyMembers } = useAppContext();
   const [step, setStep] = useState(1);
   const [provider, setProvider] = useState("");
   const [policyNumber, setPolicyNumber] = useState("");
@@ -137,6 +139,8 @@ export function Onboarding() {
       clearInterval(interval);
       setParseProgress(100);
       setCoverage(result);
+      // Refresh family members so filter pills reflect newly-created persons
+      listFamilyMembers().then(setFamilyMembers).catch(() => {});
       setTimeout(() => setStep(3), 300);
     } catch (err) {
       clearInterval(interval);

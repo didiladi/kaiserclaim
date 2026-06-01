@@ -123,16 +123,38 @@ async def parse_contract_pdf(
 
     await db.flush()
 
+    # Pre-compute existing member_key slugs so new ones don't collide
+    existing_slugs = {m.member_key for m in family_members}
+    new_member_color_idx = 0  # cycles through palette for auto-created members
+
     # Insert new data
     new_persons = []
     for person_data in extraction.get("persons", []):
-        family_member_id = _match_family_member(person_data.get("full_name", ""), family_members)
+        full_name = person_data.get("full_name", "")
+        family_member_id = _match_family_member(full_name, family_members)
+
+        # Auto-create a FamilyMember when no match is found
+        if family_member_id is None and full_name:
+            new_member = _auto_create_family_member(
+                db=db,
+                user_id=current_user.id,
+                full_name=full_name,
+                existing_slugs=existing_slugs,
+                color_index=new_member_color_idx,
+            )
+            db.add(new_member)
+            await db.flush()
+            family_member_id = new_member.id
+            existing_slugs.add(new_member.member_key)
+            family_members = list(family_members) + [new_member]
+            new_member_color_idx += 1
+
         birth_date = _parse_date(person_data.get("birth_date"))
 
         person = InsuredPerson(
             contract_id=contract_id,
             family_member_id=family_member_id,
-            full_name=person_data.get("full_name", ""),
+            full_name=full_name,
             kd_nr=person_data.get("kd_nr"),
             birth_date=birth_date,
         )
@@ -248,6 +270,46 @@ def _assert_owned(obj, user_id: UUID) -> None:
 
 
 _HONORIFICS = {"mag", "dr", "prof", "ing", "dipl", "msc", "mba", "bsc", "phd", "ddr", "ao", "univ"}
+
+_MEMBER_COLOR_PALETTE = [
+    "#E84393", "#3B82F6", "#F59E0B", "#10B981",
+    "#8B5CF6", "#EF4444", "#06B6D4", "#F97316",
+    "#84CC16", "#EC4899", "#0EA5E9", "#A855F7",
+]
+
+
+def _auto_create_family_member(
+    db, user_id: UUID, full_name: str, existing_slugs: set, color_index: int
+) -> FamilyMember:
+    """Create a FamilyMember from an insured person's full name."""
+    tokens = full_name.split()
+    # Extract first name (skip honorifics)
+    first_name = ""
+    last_name = ""
+    real_tokens = [t for t in tokens if not t.endswith(".") and t.lower().rstrip(".") not in _HONORIFICS]
+    if real_tokens:
+        first_name = real_tokens[0]
+    if len(real_tokens) >= 2:
+        last_name = real_tokens[-1]
+
+    # Build a collision-safe slug
+    base_slug = first_name.lower() if first_name else "person"
+    slug = base_slug
+    n = 2
+    while slug in existing_slugs:
+        slug = f"{base_slug}_{n}"
+        n += 1
+
+    initials = (first_name[:1] + last_name[:1]).upper() if first_name else "?"
+    color = _MEMBER_COLOR_PALETTE[color_index % len(_MEMBER_COLOR_PALETTE)]
+
+    return FamilyMember(
+        user_id=user_id,
+        member_key=slug,
+        name=first_name or full_name,
+        color=color,
+        initials=initials,
+    )
 
 
 def _match_family_member(full_name: str, family_members) -> UUID | None:

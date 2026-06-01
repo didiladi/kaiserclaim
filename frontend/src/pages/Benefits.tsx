@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Shield, Plus, AlertCircle } from "lucide-react";
+import { Shield, Plus, AlertCircle, ChevronDown, ChevronRight } from "lucide-react";
 import { listContracts, getCoverage } from "../api";
 import type { Contract, ContractCoverage, BenefitRuleDetail, InsuredPersonRead } from "../api";
 import { useAppContext } from "../state/AppContext";
@@ -19,12 +19,37 @@ const RESET_PERIOD_LABEL: Record<string, string> = {
   BIANNUAL: "2-jährlich",
 };
 
+// ---------------------------------------------------------------------------
+// Grouping logic
+// ---------------------------------------------------------------------------
+
+type GroupKey = "vorsorge" | "fallbezogen" | "selbstbehalt";
+
+const GROUPS: { key: GroupKey; label: string; defaultCollapsed: boolean }[] = [
+  { key: "vorsorge",    label: "Programme & Vorsorge",     defaultCollapsed: false },
+  { key: "fallbezogen", label: "Fallbezogene Leistungen",  defaultCollapsed: true  },
+  { key: "selbstbehalt",label: "Selbstbehalt",             defaultCollapsed: true  },
+];
+
+function getBenefitGroup(b: BenefitRuleDetail): GroupKey {
+  if (b.benefit_kind === "DEDUCTIBLE") return "selbstbehalt";
+  if (
+    b.benefit_kind === "PROGRAM" ||
+    b.reset_period === "CALENDAR_YEAR" ||
+    b.reset_period === "ONCE_PER_YEAR" ||
+    b.reset_period === "INSURANCE_YEAR"
+  ) return "vorsorge";
+  return "fallbezogen";
+}
+
+// ---------------------------------------------------------------------------
+// BenefitItem
+// ---------------------------------------------------------------------------
+
 function BenefitItem({ benefit }: { benefit: BenefitRuleDetail }) {
   const isProgram = benefit.benefit_kind === "PROGRAM";
   const periodLabel = benefit.reset_period
     ? (RESET_PERIOD_LABEL[benefit.reset_period] ?? benefit.reset_period)
-    : benefit.benefit_kind
-    ? RESET_PERIOD_LABEL[benefit.benefit_kind] ?? null
     : null;
 
   return (
@@ -60,12 +85,10 @@ function BenefitItem({ benefit }: { benefit: BenefitRuleDetail }) {
         </div>
       </div>
 
-      {/* Usage bar (only for BUDGET with a limit) */}
       {benefit.limit_amount != null && !isProgram && (
         <ProgressBar used={benefit.amount_used} limit={benefit.limit_amount} />
       )}
 
-      {/* PROGRAM: show used/not-used indicator */}
       {isProgram && (
         <div className="flex items-center gap-1.5 mt-1">
           {benefit.amount_used > 0 ? (
@@ -79,6 +102,64 @@ function BenefitItem({ benefit }: { benefit: BenefitRuleDetail }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// BenefitGroupSection — collapsible group with chevron + count badge
+// ---------------------------------------------------------------------------
+
+function BenefitGroupSection({
+  label,
+  benefits,
+  collapsed,
+  onToggle,
+}: {
+  label: string;
+  benefits: BenefitRuleDetail[];
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
+  if (benefits.length === 0) return null;
+
+  const unusedPrograms = benefits.filter(
+    (b) => b.benefit_kind === "PROGRAM" && b.amount_used === 0
+  ).length;
+
+  return (
+    <div>
+      {/* Group header */}
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center justify-between px-4 py-2.5 bg-kc-surfaceAlt border-b border-kc-borderLight hover:bg-kc-border/30 transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          {collapsed ? (
+            <ChevronRight size={14} className="text-kc-textSec flex-shrink-0" />
+          ) : (
+            <ChevronDown size={14} className="text-kc-textSec flex-shrink-0" />
+          )}
+          <span className="text-[12px] font-semibold text-kc-textSec uppercase tracking-wider">
+            {label}
+          </span>
+          <span className="text-[11px] text-kc-textSec bg-kc-border px-1.5 py-0.5 rounded-full">
+            {benefits.length}
+          </span>
+          {unusedPrograms > 0 && (
+            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">
+              {unusedPrograms} ungenutzt
+            </span>
+          )}
+        </div>
+      </button>
+
+      {/* Benefit rows */}
+      {!collapsed && benefits.map((b) => <BenefitItem key={b.id} benefit={b} />)}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PersonSection — one insured person with grouped benefits
+// ---------------------------------------------------------------------------
+
 function PersonSection({
   person,
   familyMembers,
@@ -88,17 +169,33 @@ function PersonSection({
   familyMembers: ReturnType<typeof useAppContext>["familyMembers"];
   activeMember: string;
 }) {
-  // Determine avatar info from matched family member
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<GroupKey, boolean>>({
+    vorsorge: false,
+    fallbezogen: true,
+    selbstbehalt: true,
+  });
+
   const matched = person.family_member_id
     ? familyMembers.find((m) => m.id === person.family_member_id)
     : null;
 
-  // Filter: only show if activeMember matches this person's linked family member
   if (activeMember !== "all" && (!matched || matched.member_key !== activeMember)) {
     return null;
   }
 
   const allBenefits = person.tariffs.flatMap((t) => t.benefits);
+
+  const grouped: Record<GroupKey, BenefitRuleDetail[]> = {
+    vorsorge: [],
+    fallbezogen: [],
+    selbstbehalt: [],
+  };
+  for (const b of allBenefits) {
+    grouped[getBenefitGroup(b)].push(b);
+  }
+
+  const toggle = (key: GroupKey) =>
+    setCollapsedGroups((prev) => ({ ...prev, [key]: !prev[key] }));
 
   return (
     <div>
@@ -126,12 +223,23 @@ function PersonSection({
       {allBenefits.length === 0 && (
         <p className="px-4 py-3 text-[13px] text-kc-textSec">Keine Leistungen</p>
       )}
-      {allBenefits.map((benefit) => (
-        <BenefitItem key={benefit.id} benefit={benefit} />
+
+      {GROUPS.map(({ key, label }) => (
+        <BenefitGroupSection
+          key={key}
+          label={label}
+          benefits={grouped[key]}
+          collapsed={collapsedGroups[key]}
+          onToggle={() => toggle(key)}
+        />
       ))}
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Benefits page
+// ---------------------------------------------------------------------------
 
 export function Benefits() {
   const { activeMember, familyMembers } = useAppContext();
@@ -184,8 +292,6 @@ export function Benefits() {
         {contracts.map((contract) => {
           const coverage = coverages[contract.id];
           const persons = coverage?.insured_persons ?? [];
-
-          // Check if there's a legacy contract with no insured persons yet
           const hasPersons = persons.length > 0;
 
           return (
@@ -203,7 +309,6 @@ export function Benefits() {
                 </div>
               </div>
 
-              {/* No persons yet */}
               {!hasPersons && (
                 <div className="flex items-center gap-2 px-4 py-3 text-[13px] text-kc-textSec">
                   <AlertCircle size={15} className="flex-shrink-0" />
@@ -211,7 +316,6 @@ export function Benefits() {
                 </div>
               )}
 
-              {/* Per person */}
               {persons.map((person) => (
                 <PersonSection
                   key={person.id}
