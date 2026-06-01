@@ -90,7 +90,13 @@ async def parse_contract_pdf(
     text = await pdf_to_text_native(tmp_path)
     Path(tmp_path).unlink(missing_ok=True)
 
-    extraction = await parse_contract_full(text)
+    try:
+        extraction = await parse_contract_full(text)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"KI-Analyse fehlgeschlagen: {type(exc).__name__}: {exc}",
+        ) from exc
 
     # Load all family members for first-name matching
     members_result = await db.execute(

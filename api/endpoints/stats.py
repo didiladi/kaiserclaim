@@ -5,6 +5,7 @@ All monetary figures are in EUR. The reimbursement rate of 82% is applied to
 COMPLETED invoices to compute total_reimbursed and eigenanteil, matching the
 design spec's financial model.
 """
+from datetime import date, datetime, timezone, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -107,8 +108,6 @@ async def _compute_unused_alerts(db, user_id, all_rules: list) -> list[dict]:
     For each yearly BUDGET or PROGRAM benefit: if it's unused (or < 30% used)
     and the next reset is within _UNUSED_LEAD_DAYS days, surface a reminder.
     """
-    from datetime import date, datetime, timezone, timedelta
-
     today = date.today()
     current_year = today.year
     alerts = []

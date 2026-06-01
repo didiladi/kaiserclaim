@@ -114,6 +114,7 @@ export function Onboarding() {
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [parsing, setParsing] = useState(false);
   const [parseProgress, setParseProgress] = useState(0);
+  const [parseError, setParseError] = useState<string | null>(null);
   const [coverage, setCoverage] = useState<ContractCoverage | null>(null);
   const [saving, setSaving] = useState(false);
   const { label: parseStageLabel, elapsed: parseElapsed } = useParseStage(parsing);
@@ -128,6 +129,7 @@ export function Onboarding() {
     if (!pdfFile || !contractId) return;
     setParsing(true);
     setParseProgress(0);
+    setParseError(null);
     // Slow crawl to 90% over ~110s so the bar keeps moving for the full Gemini extraction
     const interval = setInterval(() => setParseProgress((p) => Math.min(p + 90 / 110, 90)), 1000);
     try {
@@ -136,8 +138,9 @@ export function Onboarding() {
       setParseProgress(100);
       setCoverage(result);
       setTimeout(() => setStep(3), 300);
-    } catch {
+    } catch (err) {
       clearInterval(interval);
+      setParseError(err instanceof Error ? err.message : "Analyse fehlgeschlagen. Bitte erneut versuchen.");
       setParsing(false);
     }
   };
@@ -210,6 +213,12 @@ export function Onboarding() {
           <Button fullWidth size="lg" disabled={!pdfFile || parsing} loading={parsing} onClick={handleParse}>
             Vertrag analysieren
           </Button>
+          {parseError && (
+            <div className="p-3 rounded-lg bg-red-50 border border-red-200">
+              <p className="text-[13px] text-red-700 font-medium">Analyse fehlgeschlagen</p>
+              <p className="text-[12px] text-red-600 mt-0.5">{parseError}</p>
+            </div>
+          )}
         </div>
       )}
 

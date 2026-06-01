@@ -23,6 +23,8 @@ services:
       POSTGRES_USER: kaiserclaim
       POSTGRES_PASSWORD: secret
       POSTGRES_DB: kaiserclaim
+    ports:
+      - "5432:5432"  # exposed for local development and running tests from the host
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
