@@ -44,21 +44,55 @@ function getBenefitGroup(b: BenefitRuleDetail): GroupKey {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-person deduplication
-// Removes benefits that appear under multiple persons when they are
-// age-specific (name contains "Kind", age ranges like "1-6 Jahre", etc.).
-// Keeps the benefit only under the youngest person (smallest birth_date).
-// For non-age-specific duplicates appearing in ALL persons, keeps only the first.
+// Age-aware benefit deduplication
+//
+// When Gemini assigns the same benefit to every person's tariff (common for
+// shared BVB sections), we filter by age eligibility:
+//   - If the benefit name contains an age range (e.g. "1-6 Jahre", "ab 18"),
+//     show it only for persons whose current age falls within that range.
+//     Persons without a birth_date keep the benefit (can't determine age).
+//   - For benefits with "Kind/Baby/Jugend" but no parseable range,
+//     show only for the youngest person.
+//   - Benefits duplicated across ALL persons with no age indicator at all:
+//     kept only under the first person.
+//   - Benefits present in only some persons: left untouched.
 // ---------------------------------------------------------------------------
 
-const _AGE_SPECIFIC_PATTERN = /kind|baby|jugend|\d+[-–]\d+\s*jahr/i;
+interface AgeRange { min: number; max: number }
+
+function parseAgeRange(name: string): AgeRange | null {
+  // "1-6 Jahre" / "1–6 Jahre"
+  const rangeMatch = name.match(/(\d+)\s*[-–]\s*(\d+)\s*Jahr/i);
+  if (rangeMatch) return { min: parseInt(rangeMatch[1]), max: parseInt(rangeMatch[2]) };
+  // "ab 18" / "ab dem 18."
+  const fromMatch = name.match(/ab\s+(\d+)/i);
+  if (fromMatch) return { min: parseInt(fromMatch[1]), max: 999 };
+  // "bis 18" / "bis zum 18."
+  const toMatch = name.match(/bis\s+(?:zum?\s+)?(\d+)/i);
+  if (toMatch) return { min: 0, max: parseInt(toMatch[1]) };
+  // "18+"
+  const plusMatch = name.match(/(\d+)\+/);
+  if (plusMatch) return { min: parseInt(plusMatch[1]), max: 999 };
+  return null;
+}
+
+function personAge(birthDate: string | null): number | null {
+  if (!birthDate) return null;
+  const today = new Date();
+  const birth = new Date(birthDate);
+  let age = today.getFullYear() - birth.getFullYear();
+  const m = today.getMonth() - birth.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < birth.getDate())) age--;
+  return age;
+}
+
+const _AGE_KEYWORD_PATTERN = /kind|baby|jugend/i;
 
 function deduplicateBenefitsAcrossPersons(
   persons: InsuredPersonRead[]
 ): InsuredPersonRead[] {
   if (persons.length <= 1) return persons;
 
-  // Build map: benefit_name → list of (personIndex, tariffIndex, benefitIndex)
   type Loc = { pi: number; ti: number; bi: number };
   const nameMap = new Map<string, Loc[]>();
 
@@ -72,37 +106,38 @@ function deduplicateBenefitsAcrossPersons(
     });
   });
 
-  // Collect (personIndex, tariffIndex, benefitIndex) to remove
   const toRemove = new Set<string>();
 
   for (const [, locs] of nameMap) {
     if (locs.length <= 1) continue;
 
-    const benefit = persons[locs[0].pi].tariffs[locs[0].ti].benefits[locs[0].bi];
-    const isAgeSpecific = _AGE_SPECIFIC_PATTERN.test(benefit.benefit_name);
+    const benefitName = persons[locs[0].pi].tariffs[locs[0].ti].benefits[locs[0].bi].benefit_name;
+    const ageRange = parseAgeRange(benefitName);
 
-    let keepPi: number;
-    if (isAgeSpecific) {
-      // Keep under the youngest person (most recent birth_date = largest timestamp)
+    if (ageRange) {
+      // Remove from persons whose age is outside the range (keep if no birth_date)
+      for (const loc of locs) {
+        const age = personAge(persons[loc.pi].birth_date);
+        if (age !== null && (age < ageRange.min || age > ageRange.max)) {
+          toRemove.add(`${loc.pi}-${loc.ti}-${loc.bi}`);
+        }
+      }
+    } else if (_AGE_KEYWORD_PATTERN.test(benefitName)) {
+      // No parseable range but clearly child/youth — keep only youngest person
       const withBirth = persons
         .map((p, i) => ({ i, birth: p.birth_date ? new Date(p.birth_date).getTime() : null }))
         .filter((x) => x.birth !== null && locs.some((l) => l.pi === x.i));
-      if (withBirth.length > 0) {
-        keepPi = withBirth.reduce((a, b) => (b.birth! > a.birth! ? b : a)).i;
-      } else {
-        keepPi = locs[0].pi;
+      const keepPi = withBirth.length > 0
+        ? withBirth.reduce((a, b) => (b.birth! > a.birth! ? b : a)).i
+        : locs[0].pi;
+      for (const loc of locs) {
+        if (loc.pi !== keepPi) toRemove.add(`${loc.pi}-${loc.ti}-${loc.bi}`);
       }
     } else {
-      // Non-age-specific duplicate across ALL persons: keep under the first person
+      // No age indicator — only deduplicate if present in every single person
       const uniquePersons = new Set(locs.map((l) => l.pi));
-      if (uniquePersons.size < persons.length) continue; // not in all — keep all
-      keepPi = locs[0].pi;
-    }
-
-    for (const loc of locs) {
-      if (loc.pi !== keepPi) {
-        toRemove.add(`${loc.pi}-${loc.ti}-${loc.bi}`);
-      }
+      if (uniquePersons.size < persons.length) continue;
+      for (const loc of locs.slice(1)) toRemove.add(`${loc.pi}-${loc.ti}-${loc.bi}`);
     }
   }
 
@@ -112,9 +147,7 @@ function deduplicateBenefitsAcrossPersons(
     ...person,
     tariffs: person.tariffs.map((tariff, ti) => ({
       ...tariff,
-      benefits: tariff.benefits.filter(
-        (_, bi) => !toRemove.has(`${pi}-${ti}-${bi}`)
-      ),
+      benefits: tariff.benefits.filter((_, bi) => !toRemove.has(`${pi}-${ti}-${bi}`)),
     })),
   }));
 }
