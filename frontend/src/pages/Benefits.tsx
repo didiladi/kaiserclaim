@@ -23,23 +23,100 @@ const RESET_PERIOD_LABEL: Record<string, string> = {
 // Grouping logic
 // ---------------------------------------------------------------------------
 
-type GroupKey = "vorsorge" | "fallbezogen" | "selbstbehalt";
+type GroupKey = "programme" | "vorsorge" | "fallbezogen" | "selbstbehalt";
 
 const GROUPS: { key: GroupKey; label: string; defaultCollapsed: boolean }[] = [
-  { key: "vorsorge",    label: "Programme & Vorsorge",     defaultCollapsed: false },
+  { key: "programme",   label: "Programme",                defaultCollapsed: true  },
+  { key: "vorsorge",    label: "Vorsorge & Jahresleistungen", defaultCollapsed: true  },
   { key: "fallbezogen", label: "Fallbezogene Leistungen",  defaultCollapsed: true  },
   { key: "selbstbehalt",label: "Selbstbehalt",             defaultCollapsed: true  },
 ];
 
 function getBenefitGroup(b: BenefitRuleDetail): GroupKey {
   if (b.benefit_kind === "DEDUCTIBLE") return "selbstbehalt";
+  if (b.benefit_kind === "PROGRAM") return "programme";
   if (
-    b.benefit_kind === "PROGRAM" ||
     b.reset_period === "CALENDAR_YEAR" ||
     b.reset_period === "ONCE_PER_YEAR" ||
     b.reset_period === "INSURANCE_YEAR"
   ) return "vorsorge";
   return "fallbezogen";
+}
+
+// ---------------------------------------------------------------------------
+// Cross-person deduplication
+// Removes benefits that appear under multiple persons when they are
+// age-specific (name contains "Kind", age ranges like "1-6 Jahre", etc.).
+// Keeps the benefit only under the youngest person (smallest birth_date).
+// For non-age-specific duplicates appearing in ALL persons, keeps only the first.
+// ---------------------------------------------------------------------------
+
+const _AGE_SPECIFIC_PATTERN = /kind|baby|jugend|\d+[-–]\d+\s*jahr/i;
+
+function deduplicateBenefitsAcrossPersons(
+  persons: InsuredPersonRead[]
+): InsuredPersonRead[] {
+  if (persons.length <= 1) return persons;
+
+  // Build map: benefit_name → list of (personIndex, tariffIndex, benefitIndex)
+  type Loc = { pi: number; ti: number; bi: number };
+  const nameMap = new Map<string, Loc[]>();
+
+  persons.forEach((person, pi) => {
+    person.tariffs.forEach((tariff, ti) => {
+      tariff.benefits.forEach((b, bi) => {
+        const key = b.benefit_name.trim().toLowerCase();
+        if (!nameMap.has(key)) nameMap.set(key, []);
+        nameMap.get(key)!.push({ pi, ti, bi });
+      });
+    });
+  });
+
+  // Collect (personIndex, tariffIndex, benefitIndex) to remove
+  const toRemove = new Set<string>();
+
+  for (const [, locs] of nameMap) {
+    if (locs.length <= 1) continue;
+
+    const benefit = persons[locs[0].pi].tariffs[locs[0].ti].benefits[locs[0].bi];
+    const isAgeSpecific = _AGE_SPECIFIC_PATTERN.test(benefit.benefit_name);
+
+    let keepPi: number;
+    if (isAgeSpecific) {
+      // Keep under the youngest person (most recent birth_date = largest timestamp)
+      const withBirth = persons
+        .map((p, i) => ({ i, birth: p.birth_date ? new Date(p.birth_date).getTime() : null }))
+        .filter((x) => x.birth !== null && locs.some((l) => l.pi === x.i));
+      if (withBirth.length > 0) {
+        keepPi = withBirth.reduce((a, b) => (b.birth! > a.birth! ? b : a)).i;
+      } else {
+        keepPi = locs[0].pi;
+      }
+    } else {
+      // Non-age-specific duplicate across ALL persons: keep under the first person
+      const uniquePersons = new Set(locs.map((l) => l.pi));
+      if (uniquePersons.size < persons.length) continue; // not in all — keep all
+      keepPi = locs[0].pi;
+    }
+
+    for (const loc of locs) {
+      if (loc.pi !== keepPi) {
+        toRemove.add(`${loc.pi}-${loc.ti}-${loc.bi}`);
+      }
+    }
+  }
+
+  if (toRemove.size === 0) return persons;
+
+  return persons.map((person, pi) => ({
+    ...person,
+    tariffs: person.tariffs.map((tariff, ti) => ({
+      ...tariff,
+      benefits: tariff.benefits.filter(
+        (_, bi) => !toRemove.has(`${pi}-${ti}-${bi}`)
+      ),
+    })),
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +247,8 @@ function PersonSection({
   activeMember: string;
 }) {
   const [collapsedGroups, setCollapsedGroups] = useState<Record<GroupKey, boolean>>({
-    vorsorge: false,
+    programme: true,
+    vorsorge: true,
     fallbezogen: true,
     selbstbehalt: true,
   });
@@ -186,6 +264,7 @@ function PersonSection({
   const allBenefits = person.tariffs.flatMap((t) => t.benefits);
 
   const grouped: Record<GroupKey, BenefitRuleDetail[]> = {
+    programme: [],
     vorsorge: [],
     fallbezogen: [],
     selbstbehalt: [],
@@ -316,7 +395,7 @@ export function Benefits() {
                 </div>
               )}
 
-              {persons.map((person) => (
+              {deduplicateBenefitsAcrossPersons(persons).map((person) => (
                 <PersonSection
                   key={person.id}
                   person={person}
