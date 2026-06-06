@@ -15,4 +15,5 @@ resources:
   - worker-deployment.yaml
   - beat-deployment.yaml
   - certificate.yaml
+  - middleware-auth.yaml
   - ingress.yaml

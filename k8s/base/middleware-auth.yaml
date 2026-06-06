@@ -1,0 +1,11 @@
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: homelab-auth
+  namespace: kaiserclaim
+spec:
+  forwardAuth:
+    address: http://homelab-auth.family.svc.cluster.local:8000/auth
+    trustForwardHeader: true
+    authResponseHeaders:
+      - Location
