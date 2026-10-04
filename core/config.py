@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     # Set to True to skip real Merkur portal submission (for local testing)
     merkur_dry_run: bool = False
 
+    # Shared secret required in the X-Webhook-Secret header on /webhooks/*.
+    # Empty (the default) rejects all requests — must be set explicitly.
+    webhook_secret: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -44,10 +44,13 @@ export type InvoiceStatus =
   | "OEGK_SUBMITTED"
   | "OEGK_REFUNDED"
   | "READY_FOR_MERKUR"
+  | "MERKUR_SUBMITTING"
   | "MERKUR_SUBMITTED"
   | "MERKUR_REIMBURSED"
   | "MERKUR_REJECTED"
-  | "COMPLETED";
+  | "COMPLETED"
+  | "NEEDS_REVIEW"
+  | "FAILED";
 
 export interface FamilyMember {
   id: string;
@@ -216,6 +219,17 @@ export async function uploadInvoice(
 
 export function submitToMerkur(id: string): Promise<Invoice> {
   return apiFetch<Invoice>(`/invoices/${id}/submit-merkur`, { method: "POST" });
+}
+
+export function correctInvoice(
+  id: string,
+  data: { amount?: number; date?: string; provider_name?: string; patient_name?: string },
+): Promise<Invoice> {
+  return apiFetch<Invoice>(`/invoices/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
 }
 
 // ---------------------------------------------------------------------------

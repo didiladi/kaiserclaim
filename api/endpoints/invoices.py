@@ -13,8 +13,10 @@ from api.dependencies import get_current_user
 from core.config import get_settings
 from core.database import get_db
 from models.domain import FamilyMember, Invoice, InvoiceStatus, User
-from schemas.payload import InvoiceCreate, InvoiceRead, InvoiceStatusUpdate
+from schemas.payload import InvoiceCorrection, InvoiceRead, InvoiceStatusUpdate
 from workers.tasks import run_ocr, submit_to_merkur
+
+_CORRECTABLE_STATUSES = {InvoiceStatus.NEEDS_REVIEW, InvoiceStatus.READY_FOR_MERKUR}
 
 _TERMINAL_STATUSES = {
     InvoiceStatus.COMPLETED,
@@ -72,23 +74,6 @@ async def upload_invoice(
     return invoice
 
 
-@router.post("/", response_model=InvoiceRead, status_code=status.HTTP_201_CREATED)
-async def create_invoice(
-    payload: InvoiceCreate,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    invoice = Invoice(user_id=current_user.id, **payload.model_dump())
-    db.add(invoice)
-    await db.commit()
-    await db.refresh(invoice)
-
-    # Kick off OCR immediately as a background Celery task
-    run_ocr.delay(str(invoice.id))
-
-    return invoice
-
-
 @router.get("/", response_model=list[InvoiceRead])
 async def list_invoices(
     member_key: str | None = Query(default=None, description="Filter by family member key"),
@@ -135,6 +120,44 @@ async def get_invoice(
         .options(selectinload(Invoice.merkur_document))
     )
     _assert_owned(invoice, current_user.id)
+    return invoice
+
+
+@router.patch("/{invoice_id}", response_model=InvoiceRead)
+async def correct_invoice(
+    invoice_id: UUID,
+    payload: InvoiceCorrection,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Fill in fields OCR missed. Once amount and date are both present, a
+    NEEDS_REVIEW invoice advances to READY_FOR_MERKUR (it is not submitted
+    automatically; the user triggers that via /submit-merkur)."""
+    invoice = await db.scalar(
+        select(Invoice)
+        .where(Invoice.id == invoice_id)
+        .options(selectinload(Invoice.merkur_document))
+    )
+    _assert_owned(invoice, current_user.id)
+
+    if invoice.status not in _CORRECTABLE_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Invoice can only be corrected in NEEDS_REVIEW or READY_FOR_MERKUR, current: {invoice.status.value}",
+        )
+
+    for field, value in payload.model_dump(exclude_unset=True, exclude_none=True).items():
+        setattr(invoice, field, value)
+
+    if (
+        invoice.status == InvoiceStatus.NEEDS_REVIEW
+        and invoice.amount is not None
+        and invoice.date is not None
+    ):
+        invoice.status = InvoiceStatus.READY_FOR_MERKUR
+
+    await db.commit()
+    await db.refresh(invoice)
     return invoice
 
 

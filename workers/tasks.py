@@ -10,12 +10,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from celery import Celery
+from celery.exceptions import MaxRetriesExceededError
 from celery.schedules import crontab
 
 from core.config import get_settings
 from core.database import AsyncSessionLocal
 from models.domain import BenefitKind, BenefitRule, BenefitUsage, InsuredPerson, Invoice, InvoiceStatus, MerkurDocument, MerkurResultState, ResetPeriod, Tariff, User
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from services.ocr_engine import pdf_to_text
 from services.regex_parser import parse_pharmacy_receipt
 from services.rksv_parser import extract_rksv_from_image
@@ -67,6 +68,26 @@ async def _set_status(invoice_id: str, status: InvoiceStatus) -> None:
 async def _get_invoice(invoice_id: str) -> Invoice | None:
     async with AsyncSessionLocal() as db:
         return await db.get(Invoice, invoice_id)
+
+
+async def _try_transition(invoice_id: str, expected: InvoiceStatus, new: InvoiceStatus) -> bool:
+    """Atomically move an invoice from `expected` to `new`.
+
+    Returns False without changing anything if the invoice was not in `expected`
+    (e.g. a retry running after an earlier attempt already claimed it). This is
+    the guard that keeps a Celery retry from re-clicking a portal submission
+    that may have already gone through.
+    """
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            update(Invoice)
+            .where(Invoice.id == invoice_id, Invoice.status == expected)
+            .values(status=new)
+            .returning(Invoice.id)
+        )
+        row = result.first()
+        await db.commit()
+        return row is not None
 
 
 async def _finalize_invoice(invoice_id: str) -> None:
@@ -121,6 +142,14 @@ def run_ocr(self, invoice_id: str) -> dict:
             date, amount = parsed.date, parsed.amount
             print(f"OCR fallback: date={date} amount={amount}", flush=True)
 
+        # Missing date or amount means we can't safely advance the invoice —
+        # route it to a human instead of silently submitting a 0.00 claim.
+        next_status = (
+            InvoiceStatus.NEEDS_REVIEW
+            if date is None or amount is None
+            else InvoiceStatus.READY_FOR_MERKUR
+        )
+
         async def _update():
             async with AsyncSessionLocal() as db:
                 inv = await db.get(Invoice, invoice_id)
@@ -128,24 +157,61 @@ def run_ocr(self, invoice_id: str) -> dict:
                     inv.amount = amount
                     inv.date = date
                     # Pharmacy receipts skip ÖGK — go straight to Merkur
-                    inv.status = InvoiceStatus.READY_FOR_MERKUR
+                    inv.status = next_status
                     await db.commit()
 
         _run(_update())
-        return {"invoice_id": invoice_id, "status": "READY_FOR_MERKUR"}
+        return {"invoice_id": invoice_id, "status": next_status.value}
 
     except Exception as exc:
-        raise self.retry(exc=exc)
+        try:
+            raise self.retry(exc=exc)
+        except MaxRetriesExceededError:
+            _run(_set_status(invoice_id, InvoiceStatus.FAILED))
+            raise
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=120)
 def submit_to_merkur(self, invoice_id: str) -> dict:
-    """Submit invoice PDF to Merkur portal via headless Playwright."""
+    """Submit invoice PDF to Merkur portal via headless Playwright.
+
+    Idempotency: the invoice is moved READY_FOR_MERKUR -> MERKUR_SUBMITTING via
+    an atomic compare-and-set BEFORE the portal is touched. If that CAS fails,
+    a prior attempt already claimed this invoice (crashed mid-flight, or is
+    concurrently running) — we do NOT click submit again.
+
+    Once the CAS succeeds, a failure must NOT trigger Celery's automatic
+    retry: the click may have already reached the real portal, so blindly
+    retrying risks a genuine double submission. Any failure past this point
+    marks the invoice FAILED immediately (no retry loop) and a human
+    reconciles it against the real Merkur Postfach. Only the invoice lookup
+    before the CAS is safe to retry, since nothing has been submitted yet.
+    """
     try:
         invoice = _run(_get_invoice(invoice_id))
         if not invoice:
             raise ValueError(f"Invoice {invoice_id} not found")
+    except Exception as exc:
+        try:
+            raise self.retry(exc=exc)
+        except MaxRetriesExceededError:
+            raise
 
+    if invoice.status != InvoiceStatus.READY_FOR_MERKUR:
+        return {
+            "invoice_id": invoice_id,
+            "status": invoice.status.value,
+            "skipped": True,
+            "reason": f"invoice not in READY_FOR_MERKUR (was {invoice.status.value})",
+        }
+
+    claimed = _run(_try_transition(
+        invoice_id, InvoiceStatus.READY_FOR_MERKUR, InvoiceStatus.MERKUR_SUBMITTING
+    ))
+    if not claimed:
+        return {"invoice_id": invoice_id, "status": "MERKUR_SUBMITTING", "skipped": True}
+
+    try:
         if settings.merkur_dry_run:
             print(f"[DRY RUN] Skipping Merkur portal submission for invoice {invoice_id}", flush=True)
         else:
@@ -158,6 +224,8 @@ def submit_to_merkur(self, invoice_id: str) -> dict:
                 patient_name=invoice.patient_name or "",
             ))
             if not success:
+                # The click may or may not have actually gone through (the
+                # success heuristic is imperfect) — treat as failed, do not retry.
                 raise RuntimeError("Merkur submission did not return a success signal")
 
         _run(_set_status(invoice_id, InvoiceStatus.MERKUR_SUBMITTED))
@@ -165,8 +233,11 @@ def submit_to_merkur(self, invoice_id: str) -> dict:
         # once Merkur places the result PDF in the Postfach.
         return {"invoice_id": invoice_id, "status": "MERKUR_SUBMITTED"}
 
-    except Exception as exc:
-        raise self.retry(exc=exc)
+    except Exception:
+        # No automatic retry here — see docstring. The invoice is left
+        # discoverable as FAILED instead of silently stuck in MERKUR_SUBMITTING.
+        _run(_set_status(invoice_id, InvoiceStatus.FAILED))
+        raise
 
 
 @celery_app.task(bind=True, max_retries=5, default_retry_delay=300)
@@ -192,7 +263,11 @@ def submit_to_oegk(self, invoice_id: str) -> dict:
         return {"invoice_id": invoice_id, "status": "OEGK_SUBMITTED"}
 
     except Exception as exc:
-        raise self.retry(exc=exc)
+        try:
+            raise self.retry(exc=exc)
+        except MaxRetriesExceededError:
+            _run(_set_status(invoice_id, InvoiceStatus.FAILED))
+            raise
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
@@ -436,11 +511,20 @@ async def _scan_unused_benefits_async() -> dict:
 
 
 @celery_app.task(bind=True, max_retries=10, default_retry_delay=600)
-def poll_oegk_refund(self, invoice_id: str, output_dir: str) -> dict:
+def poll_oegk_refund(self, invoice_id: str) -> dict:
     """Poll ÖGK portal for refund PDF; retries up to ~100 min (10 × 10 min)."""
     try:
+        invoice = _run(_get_invoice(invoice_id))
+        if not invoice:
+            raise ValueError(f"Invoice {invoice_id} not found")
+
+        # Output directory is derived server-side (same pattern as
+        # sync_merkur_inbox) rather than trusted from an external caller.
+        output_dir = Path(settings.storage_root) / str(invoice.user_id) / "oegk_refunds"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
         bot = OegkBot()
-        refund_path = _run(bot.download_refund_pdf(output_dir))
+        refund_path = _run(bot.download_refund_pdf(str(output_dir)))
 
         if not refund_path:
             raise self.retry(exc=RuntimeError("Refund PDF not yet available"))

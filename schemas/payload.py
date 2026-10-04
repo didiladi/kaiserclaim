@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Optional, Literal, List
 
-from pydantic import BaseModel, EmailStr, ConfigDict
+from pydantic import BaseModel, EmailStr, ConfigDict, Field
 
 from models.domain import InvoiceStatus, LimitType, MerkurResultState, BenefitKind, ResetPeriod
 
@@ -143,19 +143,16 @@ class ContractCoverageRead(BaseModel):
 # Invoice
 # ---------------------------------------------------------------------------
 
-class InvoiceCreate(BaseModel):
-    file_path: str
-    provider_name: Optional[str] = None
-    patient_name: Optional[str] = None
-    amount: Optional[float] = None
-    date: Optional[datetime] = None
-    benefit_rule_id: Optional[uuid.UUID] = None
-    category: Optional[str] = None
-    family_member_id: Optional[uuid.UUID] = None
-
-
 class InvoiceStatusUpdate(BaseModel):
     status: InvoiceStatus
+
+
+class InvoiceCorrection(BaseModel):
+    """Manual fix-up of fields OCR could not extract (NEEDS_REVIEW recovery)."""
+    amount: Optional[float] = Field(default=None, gt=0)
+    date: Optional[datetime] = None
+    provider_name: Optional[str] = None
+    patient_name: Optional[str] = None
 
 
 # Pipeline variant: pharmacy skips ÖGK; standard goes through all 8 steps.
