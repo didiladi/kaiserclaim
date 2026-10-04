@@ -108,7 +108,7 @@ Analysis date: 2026-07-03. Scope: full repo review (architecture, workflows, sec
 - [ ] If yes:
   - [x] Route by category in `run_ocr` (pharmacy vs standard, the `_derive_pipeline` logic already exists in `schemas/payload.py:164`) and dispatch `submit_to_oegk`. (`tasks.py:131`)
   - [ ] `scripts/calibrate_oegk.py` is written (harness only). Still to do after running it live: replace the placeholder selectors and success check, add fixture tests. (`playwright_bot.py:608-663`)
-  - [ ] Headed-browser 2FA: `OEGK_HEADLESS` is configurable (default headed) but the deployment still has no display. Solve it: run the ÖGK bot on the desktop, or a VNC/Xvfb sidecar in the pod; the persistent-session volume design already exists.
+  - [x] Headed-browser 2FA: solved with a desktop worker on the dedicated `oegk` queue (`scripts/run_oegk_worker.sh`). Alternatives considered: run the ÖGK bot on the desktop, or a VNC/Xvfb sidecar in the pod; the persistent-session volume design already exists.
   - [x] (code done; matching refund PDFs to invoices needs a key from calibration) Wire the refund path: `poll_oegk_refund`, transition to `READY_FOR_MERKUR`, and call `_finalize_invoice` so `COMPLETED` and `BenefitUsage` actually happen. (`tasks.py:72-91, 438+`)
 - [ ] If no: delete `OegkBot`, `submit_to_oegk`, `poll_oegk_refund`, the webhook, and the unreachable statuses; simplify the enum and the UI stepper.
 

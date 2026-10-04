@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     # Set True only once the persistent session is known to be valid.
     oegk_headless: bool = False
 
+    # Base URL of the API (e.g. https://kaiserclaim.home). The desktop ÖGK worker
+    # uses it to fetch invoice files that live on the cluster's volume.
+    api_base_url: str = ""
+
     # Shared secret required in the X-Webhook-Secret header on /webhooks/*.
     # Empty (the default) rejects all requests — must be set explicitly.
     webhook_secret: str = ""

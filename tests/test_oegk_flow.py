@@ -10,6 +10,7 @@ depend on leftover rows in the dev database.
 """
 import asyncio
 import uuid
+from pathlib import Path
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -24,7 +25,12 @@ from tests.test_task_status_transitions import (  # also installs the NullPool e
     _run_task,
 )
 from workers import tasks as tasks_module
-from workers.tasks import poll_oegk_refund, run_ocr, submit_to_oegk
+from workers.tasks import _ensure_local_file, celery_app, poll_oegk_refund, run_ocr, submit_to_oegk
+
+
+_FIXTURE = Path("/tmp/kaiserclaim-test-storage/fixture.pdf")
+_FIXTURE.parent.mkdir(parents=True, exist_ok=True)
+_FIXTURE.write_bytes(b"%PDF-1.4 test")
 
 
 async def _create(status, *, user_id=TEST_USER_ID, category=None, amount=12.34,
@@ -246,3 +252,62 @@ async def test_correction_routes_to_oegk_for_non_pharmacy(client):
 
     assert r.status_code == 200
     assert r.json()["status"] == "READY_FOR_OEGK"
+
+
+# ---------------------------------------------------------------------------
+# Desktop worker: queue routing + file fetch
+# ---------------------------------------------------------------------------
+
+def test_browser_tasks_routed_to_oegk_queue():
+    routes = celery_app.conf.task_routes
+    assert routes["workers.tasks.submit_to_oegk"]["queue"] == "oegk"
+    assert routes["workers.tasks.poll_oegk_refund"]["queue"] == "oegk"
+    # The fan-out task needs no browser and stays on the default (cluster) queue.
+    assert "workers.tasks.poll_oegk_refunds" not in routes
+
+
+def test_ensure_local_file_returns_existing_path():
+    inv = Invoice(id=uuid.uuid4(), user_id=TEST_USER_ID, file_path=str(_FIXTURE))
+    assert _ensure_local_file(inv) == str(_FIXTURE)
+
+
+def test_ensure_local_file_missing_without_api_url_raises():
+    inv = Invoice(id=uuid.uuid4(), user_id=TEST_USER_ID, file_path="/nonexistent/x.pdf")
+    with patch.object(tasks_module.settings, "api_base_url", ""):
+        with pytest.raises(FileNotFoundError):
+            _ensure_local_file(inv)
+
+
+def test_submit_to_oegk_unfetchable_file_retries_without_claiming():
+    """A missing file must not burn the claim: nothing touched the portal."""
+    invoice_id = _make(InvoiceStatus.READY_FOR_OEGK)
+    with patch("workers.tasks._ensure_local_file", side_effect=FileNotFoundError("gone")), \
+         patch(
+             "workers.tasks.OegkBot.submit_invoice",
+             new=AsyncMock(side_effect=AssertionError("bot must not be invoked")),
+         ):
+        with pytest.raises(Exception):  # celery Retry (or the original error)
+            _run_task(submit_to_oegk.run, invoice_id)
+
+    assert _get_status(invoice_id) == InvoiceStatus.READY_FOR_OEGK
+
+
+@pytest.mark.asyncio
+async def test_invoice_file_endpoint_serves_stored_file(client):
+    invoice_id = await _create(InvoiceStatus.READY_FOR_OEGK)
+    from core.config import get_settings
+    with patch.object(get_settings(), "storage_root", "/tmp/kaiserclaim-test-storage"):
+        r = await client.get(api_url(f"/invoices/{invoice_id}/file"))
+    assert r.status_code == 200
+    assert r.content.startswith(b"%PDF")
+
+
+@pytest.mark.asyncio
+async def test_invoice_file_endpoint_refuses_path_outside_storage(client):
+    invoice_id = await _create(InvoiceStatus.READY_FOR_OEGK)
+    async with _TestSession() as db:
+        inv = await db.get(Invoice, invoice_id)
+        inv.file_path = "/etc/hostname"
+        await db.commit()
+    r = await client.get(api_url(f"/invoices/{invoice_id}/file"))
+    assert r.status_code == 404

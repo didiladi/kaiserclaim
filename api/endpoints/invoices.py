@@ -5,6 +5,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -125,6 +126,23 @@ async def get_invoice(
     )
     _assert_owned(invoice, current_user.id)
     return invoice
+
+
+@router.get("/{invoice_id}/file")
+async def download_invoice_file(
+    invoice_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Serve the stored upload (used by the desktop ÖGK worker)."""
+    invoice = await db.get(Invoice, invoice_id)
+    _assert_owned(invoice, current_user.id)
+
+    path = Path(invoice.file_path).resolve()
+    root = Path(settings.storage_root).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    return FileResponse(path)
 
 
 @router.patch("/{invoice_id}", response_model=InvoiceRead)

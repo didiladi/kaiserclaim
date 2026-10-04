@@ -38,6 +38,14 @@ celery_app.conf.update(
     timezone="Europe/Vienna",
     enable_utc=True,
 )
+# ÖGK tasks drive a headed browser (ID-Austria 2FA), so they are consumed only
+# by a worker started with `-Q oegk` on a machine with a display. The cluster
+# worker listens on the default queue and never picks them up.
+OEGK_QUEUE = "oegk"
+celery_app.conf.task_routes = {
+    "workers.tasks.submit_to_oegk": {"queue": OEGK_QUEUE},
+    "workers.tasks.poll_oegk_refund": {"queue": OEGK_QUEUE},
+}
 celery_app.conf.beat_schedule = {
     "merkur-inbox-daily": {
         "task": "workers.tasks.sync_merkur_inbox",
@@ -85,6 +93,28 @@ def _portal_date(dt: datetime | None) -> str:
     if dt.tzinfo is not None:
         dt = dt.astimezone(_VIENNA)
     return dt.strftime("%d.%m.%Y")
+
+
+def _ensure_local_file(invoice: Invoice) -> str:
+    """Return a local path for the invoice file, fetching it from the API if needed.
+
+    Uploads live on the cluster volume; the desktop ÖGK worker does not see it.
+    """
+    local = Path(invoice.file_path)
+    if local.exists():
+        return str(local)
+    if not settings.api_base_url:
+        raise FileNotFoundError(
+            f"{invoice.file_path} not found locally and API_BASE_URL is not set"
+        )
+    import urllib.request
+
+    dest = Path(settings.storage_root) / str(invoice.user_id) / local.name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    url = f"{settings.api_base_url.rstrip('/')}/api/v1/invoices/{invoice.id}/file?user_id={invoice.user_id}"
+    with urllib.request.urlopen(url, timeout=60) as resp, dest.open("wb") as out:
+        out.write(resp.read())
+    return str(dest)
 
 
 async def _get_invoice(invoice_id: str) -> Invoice | None:
@@ -291,6 +321,13 @@ def submit_to_oegk(self, invoice_id: str) -> dict:
         _run(_set_status(invoice_id, InvoiceStatus.NEEDS_REVIEW))
         return {"invoice_id": invoice_id, "status": "NEEDS_REVIEW", "skipped": True}
 
+    # Fetch the file BEFORE claiming: a failed download is safe to retry,
+    # nothing has touched the portal yet.
+    try:
+        local_pdf = _ensure_local_file(invoice)
+    except Exception as exc:
+        raise self.retry(exc=exc)
+
     claimed = _run(_try_transition(
         invoice_id, InvoiceStatus.READY_FOR_OEGK, InvoiceStatus.OEGK_SUBMITTING
     ))
@@ -300,7 +337,7 @@ def submit_to_oegk(self, invoice_id: str) -> dict:
     try:
         bot = OegkBot()
         success = _run(bot.submit_invoice(
-            invoice_pdf=invoice.file_path,
+            invoice_pdf=local_pdf,
             amount=invoice.amount,
             date=_portal_date(invoice.date),
         ))
