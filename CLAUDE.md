@@ -88,9 +88,11 @@ Pharmacy receipts (MVP) skip ÖGK entirely: `run_ocr` sets status to `READY_FOR_
 
 The API is fully async (FastAPI + asyncpg). Celery workers are synchronous; they bridge into async code via `asyncio.get_event_loop().run_until_complete()` in `workers/tasks.py`. Do not introduce `await` directly inside Celery task bodies — use the `_run()` helper or extract an `async def` and call `_run()` on it.
 
-### Multi-tenancy
+### Auth and multi-tenancy
 
-Every table has a `user_id` column. All queries in API endpoints must filter by `current_user.id`. The auth layer in `api/dependencies.py` is a stub (user_id passed as a parameter) — replace with JWT extraction before exposing to multiple users.
+Every `/api/v1` route (except the webhook, which has its own `X-Webhook-Secret`) goes through `get_current_user` in `api/dependencies.py`, which requires `Authorization: Bearer <API_TOKEN>` (constant-time compare). It fails closed: an empty or `CHANGE_ME` token rejects everything. `user_id` stays a query param that only selects the tenant row; the token is the credential. The frontend asks for the token on its login screen, keeps it in `localStorage`, and returns to login on any 401. CORS allows only `CORS_ORIGINS` (default: `kaiserclaim.home`, `kaiserclaim.didiladi.com`, `localhost:5173`). `tests/test_auth.py` asserts every API route is protected, so a new endpoint cannot forget the dependency. Scripts and the desktop ÖGK worker need `API_TOKEN` in their environment. Replace with per-user JWTs before going multi-user.
+
+Every table has a `user_id` column. All queries in API endpoints must filter by `current_user.id`.
 
 ### Playwright bots
 

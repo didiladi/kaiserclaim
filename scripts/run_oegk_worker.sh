@@ -7,6 +7,7 @@
 #
 # Usage:
 #   export DATABASE_URL='postgresql+asyncpg://kaiserclaim:<password>@localhost:15432/kaiserclaim'
+#   export API_TOKEN='<same token as the cluster secret>'
 #   scripts/run_oegk_worker.sh
 #
 # DATABASE_URL must be set by you (the password is in the cluster secret; this
@@ -30,6 +31,7 @@ export CELERY_BROKER_URL="redis://localhost:16379/0"
 export CELERY_RESULT_BACKEND="redis://localhost:16379/1"
 export REDIS_URL="$CELERY_BROKER_URL"
 export API_BASE_URL="${API_BASE_URL:-https://kaiserclaim.home}"
+: "${API_TOKEN:?set API_TOKEN (same value as the cluster secret) so invoice files can be fetched}"
 export OEGK_HEADLESS=false
 export STORAGE_ROOT="${STORAGE_ROOT:-$HOME/.kaiserclaim-oegk}"
 export GEMINI_API_KEY="${GEMINI_API_KEY:-unused-on-this-worker}"

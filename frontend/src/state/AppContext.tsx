@@ -1,5 +1,5 @@
-import { createContext, useContext, useState, ReactNode } from "react";
-import type { FamilyMember } from "../api";
+import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { clearToken, getToken, UNAUTHORIZED_EVENT, type FamilyMember } from "../api";
 
 export type ActiveMember = "all" | string; // "all" or a member_key
 
@@ -17,7 +17,14 @@ const AppContext = createContext<AppState | null>(null);
 export function AppProvider({ children }: { children: ReactNode }) {
   const [activeMember, setActiveMember] = useState<ActiveMember>("all");
   const [familyMembers, setFamilyMembers] = useState<FamilyMember[]>([]);
-  const [loggedIn, setLoggedIn] = useState(true); // default true; login screen sets this
+  const [loggedIn, setLoggedIn] = useState(() => getToken() !== null);
+
+  // Any 401 from the API (revoked/rotated token) drops back to the login screen.
+  useEffect(() => {
+    const onUnauthorized = () => setLoggedIn(false);
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+  }, []);
 
   return (
     <AppContext.Provider value={{ activeMember, setActiveMember, familyMembers, setFamilyMembers, loggedIn, setLoggedIn }}>

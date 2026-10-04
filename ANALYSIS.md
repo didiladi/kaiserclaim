@@ -94,7 +94,7 @@ Analysis date: 2026-07-03. Scope: full repo review (architecture, workflows, sec
 
 ### P1: Make daily use trustworthy
 
-- [ ] **Minimal real auth:** a static bearer token checked in `get_current_user` is enough for single-user; store it in the k8s secret, have the frontend send it, delete the fake login or wire it to the token. Restrict CORS to the actual origins (`kaiserclaim.home`, `kaiserclaim.didiladi.com`, `localhost:5173`). (`api/dependencies.py`, `main.py:19-24`, `frontend/src/api.ts`, `frontend/src/pages/Login.tsx`)
+- [x] **Minimal real auth (done 2026-10-04):** a static bearer token checked in `get_current_user` is enough for single-user; store it in the k8s secret, have the frontend send it, delete the fake login or wire it to the token. Restrict CORS to the actual origins (`kaiserclaim.home`, `kaiserclaim.didiladi.com`, `localhost:5173`). (`api/dependencies.py`, `main.py:19-24`, `frontend/src/api.ts`, `frontend/src/pages/Login.tsx`)
 - [ ] **Failure notifications.** On task failure and on beat-job errors, notify via the existing HA Signal notify service (same pattern as other homelab automations). A small helper called from Celery `on_failure` covers all tasks at once.
 - [ ] **Wire `scan_unused_benefits` to notifications** (Signal message listing expiring benefits) instead of `print()`. (`tasks.py:354-435`)
 - [ ] **Real dashboard numbers:** use `MerkurDocument.reimbursed_amount` where available, label the 82% figure as an estimate where not; default `year` to the current year; aggregate on invoice `date` with `created_at` fallback. (`api/endpoints/stats.py:21, 40, 185, 263`)

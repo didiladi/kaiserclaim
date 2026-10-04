@@ -112,7 +112,8 @@ def _ensure_local_file(invoice: Invoice) -> str:
     dest = Path(settings.storage_root) / str(invoice.user_id) / local.name
     dest.parent.mkdir(parents=True, exist_ok=True)
     url = f"{settings.api_base_url.rstrip('/')}/api/v1/invoices/{invoice.id}/file?user_id={invoice.user_id}"
-    with urllib.request.urlopen(url, timeout=60) as resp, dest.open("wb") as out:
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {settings.api_token}"})
+    with urllib.request.urlopen(req, timeout=60) as resp, dest.open("wb") as out:
         out.write(resp.read())
     return str(dest)
 

@@ -2,6 +2,61 @@ export const USER_ID = "00000000-0000-0000-0000-000000000001";
 
 const BASE = "/api/v1";
 
+// ---------------------------------------------------------------------------
+// Auth: static bearer token, kept in localStorage (a per-device convenience;
+// the page works, just logged out, if storage is unavailable).
+// ---------------------------------------------------------------------------
+
+const TOKEN_KEY = "kc_api_token";
+export const UNAUTHORIZED_EVENT = "kc-unauthorized";
+
+export function getToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setToken(token: string): void {
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    /* storage blocked: token only lives for this page load */
+    memoryToken = token;
+  }
+}
+
+export function clearToken(): void {
+  memoryToken = null;
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+let memoryToken: string | null = null;
+
+/** fetch() that adds the bearer token and signals the app on a 401. */
+async function authedFetch(url: string, init: RequestInit = {}, tokenOverride?: string): Promise<Response> {
+  const token = tokenOverride ?? getToken() ?? memoryToken;
+  const headers = new Headers(init.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(url, { ...init, headers });
+  if (res.status === 401 && tokenOverride === undefined) {
+    clearToken();
+    window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+  }
+  return res;
+}
+
+/** True if the token is accepted by the API (used by the login screen). */
+export async function verifyToken(token: string): Promise<boolean> {
+  const res = await authedFetch(`${BASE}/family/?user_id=${USER_ID}`, {}, token);
+  return res.ok;
+}
+
 export interface Invoice {
   id: string;
   user_id: string;
@@ -176,7 +231,7 @@ export interface MemberStats {
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const sep = path.includes("?") ? "&" : "?";
-  const res = await fetch(`${BASE}${path}${sep}user_id=${USER_ID}`, init);
+  const res = await authedFetch(`${BASE}${path}${sep}user_id=${USER_ID}`, init);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json() as Promise<T>;
 }
@@ -207,7 +262,7 @@ export async function uploadInvoice(
   if (opts?.benefitRuleId) form.append("benefit_rule_id", opts.benefitRuleId);
   if (opts?.familyMemberId) form.append("family_member_id", opts.familyMemberId);
   if (opts?.category) form.append("category", opts.category);
-  const res = await fetch(`${BASE}/invoices/upload?user_id=${USER_ID}`, {
+  const res = await authedFetch(`${BASE}/invoices/upload?user_id=${USER_ID}`, {
     method: "POST",
     body: form,
   });
@@ -264,7 +319,7 @@ export async function createContract(data: { provider_name: string; policy_numbe
 export async function parseContractPdf(contractId: string, file: File): Promise<ContractCoverage> {
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch(`${BASE}/contracts/${contractId}/parse-pdf?user_id=${USER_ID}`, {
+  const res = await authedFetch(`${BASE}/contracts/${contractId}/parse-pdf?user_id=${USER_ID}`, {
     method: "POST",
     body: form,
   });

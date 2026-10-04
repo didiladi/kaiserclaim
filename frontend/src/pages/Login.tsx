@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Shield, Mail, Lock, Loader } from "lucide-react";
+import { Shield, KeyRound, Lock } from "lucide-react";
+import { setToken, verifyToken } from "../api";
 import { useAppContext } from "../state/AppContext";
 import { Input } from "../components/Input";
 import { Button } from "../components/Button";
 
 export function Login() {
-  const [email, setEmail] = useState("");
+  const [token, setTokenValue] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const { setLoggedIn } = useAppContext();
@@ -14,17 +15,26 @@ export function Login() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email.includes("@")) {
-      setError("Bitte gültige E-Mail-Adresse eingeben");
+    const value = token.trim();
+    if (!value) {
+      setError("Bitte Zugangs-Token eingeben");
       return;
     }
     setError("");
     setLoading(true);
-    // Stub: simulate auth delay then navigate
-    setTimeout(() => {
-      setLoggedIn(true);
-      navigate("/");
-    }, 1200);
+    try {
+      if (await verifyToken(value)) {
+        setToken(value);
+        setLoggedIn(true);
+        navigate("/");
+      } else {
+        setError("Token ungültig");
+      }
+    } catch {
+      setError("Server nicht erreichbar");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -55,14 +65,14 @@ export function Login() {
         <div className="w-full bg-white rounded-lg border border-kc-border p-6 shadow-card">
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
             <Input
-              label="E-Mail-Adresse"
-              type="email"
-              placeholder="name@beispiel.at"
-              leftIcon={<Mail size={18} />}
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              label="Zugangs-Token"
+              type="password"
+              placeholder="Token einfügen"
+              leftIcon={<KeyRound size={18} />}
+              value={token}
+              onChange={(e) => setTokenValue(e.target.value)}
               error={error}
-              autoComplete="email"
+              autoComplete="current-password"
             />
             <Button type="submit" fullWidth size="lg" loading={loading}>
               {loading ? null : "Anmelden"}

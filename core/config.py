@@ -43,6 +43,18 @@ class Settings(BaseSettings):
     # uses it to fetch invoice files that live on the cluster's volume.
     api_base_url: str = ""
 
+    # Static bearer token every /api/v1 request (except the webhook, which has
+    # its own secret) must send as `Authorization: Bearer <token>`. Empty (the
+    # default) rejects all requests: auth fails closed, it must be set explicitly.
+    api_token: str = ""
+
+    # Browser origins allowed to call the API (no wildcard).
+    cors_origins: list[str] = [
+        "https://kaiserclaim.home",
+        "https://kaiserclaim.didiladi.com",
+        "http://localhost:5173",
+    ]
+
     # Shared secret required in the X-Webhook-Secret header on /webhooks/*.
     # Empty (the default) rejects all requests — must be set explicitly.
     webhook_secret: str = ""
