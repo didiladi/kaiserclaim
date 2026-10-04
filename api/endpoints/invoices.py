@@ -13,10 +13,14 @@ from api.dependencies import get_current_user
 from core.config import get_settings
 from core.database import get_db
 from models.domain import FamilyMember, Invoice, InvoiceStatus, User
-from schemas.payload import InvoiceCorrection, InvoiceRead, InvoiceStatusUpdate
-from workers.tasks import run_ocr, submit_to_merkur
+from schemas.payload import InvoiceCorrection, InvoiceRead, InvoiceStatusUpdate, first_submission_status
+from workers.tasks import run_ocr, submit_to_merkur, submit_to_oegk
 
-_CORRECTABLE_STATUSES = {InvoiceStatus.NEEDS_REVIEW, InvoiceStatus.READY_FOR_MERKUR}
+_CORRECTABLE_STATUSES = {
+    InvoiceStatus.NEEDS_REVIEW,
+    InvoiceStatus.READY_FOR_OEGK,
+    InvoiceStatus.READY_FOR_MERKUR,
+}
 
 _TERMINAL_STATUSES = {
     InvoiceStatus.COMPLETED,
@@ -131,8 +135,9 @@ async def correct_invoice(
     current_user: User = Depends(get_current_user),
 ):
     """Fill in fields OCR missed. Once amount and date are both present, a
-    NEEDS_REVIEW invoice advances to READY_FOR_MERKUR (it is not submitted
-    automatically; the user triggers that via /submit-merkur)."""
+    NEEDS_REVIEW invoice advances to READY_FOR_OEGK or READY_FOR_MERKUR
+    (depending on category). It is not submitted automatically; the user
+    triggers that via /submit-oegk or /submit-merkur."""
     invoice = await db.scalar(
         select(Invoice)
         .where(Invoice.id == invoice_id)
@@ -143,7 +148,7 @@ async def correct_invoice(
     if invoice.status not in _CORRECTABLE_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Invoice can only be corrected in NEEDS_REVIEW or READY_FOR_MERKUR, current: {invoice.status.value}",
+            detail=f"Invoice can only be corrected in NEEDS_REVIEW, READY_FOR_OEGK or READY_FOR_MERKUR, current: {invoice.status.value}",
         )
 
     for field, value in payload.model_dump(exclude_unset=True, exclude_none=True).items():
@@ -154,7 +159,7 @@ async def correct_invoice(
         and invoice.amount is not None
         and invoice.date is not None
     ):
-        invoice.status = InvoiceStatus.READY_FOR_MERKUR
+        invoice.status = first_submission_status(invoice.category)
 
     await db.commit()
     await db.refresh(invoice)
@@ -192,6 +197,27 @@ async def trigger_merkur_submission(
         )
 
     submit_to_merkur.delay(str(invoice_id))
+    return invoice
+
+
+@router.post("/{invoice_id}/submit-oegk", response_model=InvoiceRead)
+async def trigger_oegk_submission(
+    invoice_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Queue ÖGK submission. The bot needs an interactive ID-Austria 2FA login
+    when the persistent session has expired, so the worker must have a display."""
+    invoice = await db.get(Invoice, invoice_id)
+    _assert_owned(invoice, current_user.id)
+
+    if invoice.status != InvoiceStatus.READY_FOR_OEGK:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Invoice must be in READY_FOR_OEGK state, current: {invoice.status.value}",
+        )
+
+    submit_to_oegk.delay(str(invoice_id))
     return invoice
 
 

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { Send, CheckCircle, XCircle } from "lucide-react";
-import { getInvoice, submitToMerkur } from "../api";
+import { getInvoice, submitToMerkur, submitToOegk } from "../api";
 import type { Invoice } from "../api";
 import { useAppContext } from "../state/AppContext";
 import { StatusPill } from "../components/StatusPill";
@@ -60,6 +60,19 @@ export function InvoiceDetail() {
     setSubmitting(true);
     try {
       const updated = await submitToMerkur(id);
+      setInvoice(updated);
+    } catch {
+      setError("Übermittlung fehlgeschlagen");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleOegk = async () => {
+    if (!id) return;
+    setSubmitting(true);
+    try {
+      const updated = await submitToOegk(id);
       setInvoice(updated);
     } catch {
       setError("Übermittlung fehlgeschlagen");
@@ -128,7 +141,12 @@ export function InvoiceDetail() {
         </KCCard>
       )}
 
-      {/* Merkur submit CTA */}
+      {/* Submit CTAs (ÖGK first, then Merkur) */}
+      {invoice.status === "READY_FOR_OEGK" && (
+        <Button fullWidth size="lg" onClick={handleOegk} loading={submitting}>
+          Bei ÖGK einreichen
+        </Button>
+      )}
       {(invoice.status === "OEGK_REFUNDED" || invoice.status === "READY_FOR_MERKUR") && (
         <Button fullWidth size="lg" onClick={handleMerkur} loading={submitting}>
           <Send size={18} /> An Merkur übermitteln

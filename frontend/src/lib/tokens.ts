@@ -2,6 +2,7 @@ export const STATUS_CONFIG: Record<string, { label: string; color: string; bg: s
   RECEIVED:           { label: "Empfangen",              color: "#6B7280", bg: "#F3F4F6" },
   OCR_PROCESSING:     { label: "OCR-Verarbeitung",       color: "#A16207", bg: "#FEF9C3" },
   READY_FOR_OEGK:     { label: "Bereit für ÖGK",        color: "#2563EB", bg: "#DBEAFE" },
+  OEGK_SUBMITTING:    { label: "Wird bei ÖGK eingereicht", color: "#1D4ED8", bg: "#DBEAFE" },
   OEGK_SUBMITTED:     { label: "Bei ÖGK eingereicht",   color: "#1D4ED8", bg: "#DBEAFE" },
   OEGK_REFUNDED:      { label: "Von ÖGK erstattet",     color: "#4338CA", bg: "#E0E7FF" },
   READY_FOR_MERKUR:   { label: "Bereit für Merkur",     color: "#C2410C", bg: "#FFEDD5" },

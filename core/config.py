@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     # Set to True to skip real Merkur portal submission (for local testing)
     merkur_dry_run: bool = False
 
+    # ÖGK needs an interactive ID-Austria 2FA login, so the bot runs headed by
+    # default (needs a display: run the worker on the desktop or behind Xvfb/VNC).
+    # Set True only once the persistent session is known to be valid.
+    oegk_headless: bool = False
+
     # Shared secret required in the X-Webhook-Secret header on /webhooks/*.
     # Empty (the default) rejects all requests — must be set explicitly.
     webhook_secret: str = ""

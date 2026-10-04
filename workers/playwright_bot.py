@@ -596,7 +596,7 @@ class OegkBot:
         async with async_playwright() as pw:
             context: BrowserContext = await pw.chromium.launch_persistent_context(
                 str(_OEGK_USER_DATA_DIR),
-                headless=False,  # must be visible so user can complete 2FA when needed
+                headless=settings.oegk_headless,  # headed by default: user completes 2FA when the session expires
                 accept_downloads=True,
             )
             page = context.pages[0] if context.pages else await context.new_page()
@@ -636,7 +636,7 @@ class OegkBot:
         async with async_playwright() as pw:
             context = await pw.chromium.launch_persistent_context(
                 str(_OEGK_USER_DATA_DIR),
-                headless=False,
+                headless=settings.oegk_headless,
                 accept_downloads=True,
             )
             page = context.pages[0] if context.pages else await context.new_page()

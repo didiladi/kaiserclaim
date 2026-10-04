@@ -39,10 +39,16 @@ KaiserClaim has two distinct concerns that share the same data layer:
 ### Invoice state machine
 
 ```
-RECEIVED → OCR_PROCESSING → READY_FOR_OEGK → OEGK_SUBMITTED → OEGK_REFUNDED ↘
-                                                                                 READY_FOR_MERKUR → MERKUR_SUBMITTED → COMPLETED
-                                    ↑ Pharmacy MVP enters here directly ────────────────────────────────────────────────────┘
+RECEIVED → OCR_PROCESSING ─┬→ READY_FOR_OEGK → OEGK_SUBMITTING → OEGK_SUBMITTED ─(refund PDF)─┐
+                           │                                                                 ↓
+                           └→ READY_FOR_MERKUR ←─────────────────────────────────────────────┘
+READY_FOR_MERKUR → MERKUR_SUBMITTING → MERKUR_SUBMITTED → MERKUR_REIMBURSED / MERKUR_REJECTED → COMPLETED
+OCR finds no amount/date → NEEDS_REVIEW (fix via PATCH /invoices/{id}); any failure past a submit claim → FAILED
 ```
+
+**Routing** (`first_submission_status` in `schemas/payload.py`): an invoice with an explicit non-pharmacy category goes to `READY_FOR_OEGK`; pharmacy or uncategorised goes straight to `READY_FOR_MERKUR`. Submissions are user-triggered (`/submit-oegk`, `/submit-merkur`). Both claim the invoice with an atomic `READY_* → *_SUBMITTING` transition before touching the portal and never auto-retry after the claim (the click may already have gone through), so a stuck `FAILED` must be reconciled against the real portal by hand.
+
+**ÖGK refunds**: `poll_oegk_refunds` (beat, 09:00) polls each `OEGK_SUBMITTED` invoice. The portal gives no key tying a refund PDF to an invoice yet, so an invoice only advances to `READY_FOR_MERKUR` when it is the user's single one in flight; otherwise the PDF is saved and the match is manual. `OegkBot` runs headed (ID-Austria 2FA) unless `OEGK_HEADLESS=true`, so the worker needs a display. Its selectors are uncalibrated until `scripts/calibrate_oegk.py` has been run.
 
 Pharmacy receipts (MVP) skip ÖGK entirely: `run_ocr` sets status to `READY_FOR_MERKUR` directly.
 
@@ -66,6 +72,8 @@ Pharmacy receipts (MVP) skip ÖGK entirely: `run_ocr` sets status to `READY_FOR_
 | POST | `/api/v1/invoices/upload` | Upload invoice file → triggers OCR worker |
 | GET | `/api/v1/invoices/` | List invoices with `member_key`, `status_group`, `search` filters |
 | GET | `/api/v1/invoices/{id}` | Get single invoice |
+| PATCH | `/api/v1/invoices/{id}` | Correct amount/date/provider/patient (NEEDS_REVIEW recovery) |
+| POST | `/api/v1/invoices/{id}/submit-oegk` | Queue ÖGK submission (READY_FOR_OEGK only) |
 | POST | `/api/v1/invoices/{id}/submit-merkur` | Manually trigger Merkur submission |
 | GET | `/api/v1/contracts/` | List contracts |
 | POST | `/api/v1/contracts/{id}/parse-pdf` | Parse contract PDF with Gemini |

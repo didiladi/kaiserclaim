@@ -163,14 +163,28 @@ def _derive_pipeline(category: Optional[str]) -> Literal["standard", "pharmacy"]
         return "pharmacy"
     return "standard"
 
+def first_submission_status(category: Optional[str]) -> InvoiceStatus:
+    """Where a fully-parsed invoice goes next.
+
+    Only invoices with an explicitly chosen non-pharmacy category take the ÖGK
+    route. An unset category keeps the original behaviour (straight to Merkur),
+    so uploads that never picked a category are not silently rerouted.
+    """
+    if category and _derive_pipeline(category) == "standard":
+        return InvoiceStatus.READY_FOR_OEGK
+    return InvoiceStatus.READY_FOR_MERKUR
+
+
 # Ordered list of statuses — index = current_step
 _STATUS_ORDER = [
     InvoiceStatus.RECEIVED,
     InvoiceStatus.OCR_PROCESSING,
     InvoiceStatus.READY_FOR_OEGK,
+    InvoiceStatus.OEGK_SUBMITTING,
     InvoiceStatus.OEGK_SUBMITTED,
     InvoiceStatus.OEGK_REFUNDED,
     InvoiceStatus.READY_FOR_MERKUR,
+    InvoiceStatus.MERKUR_SUBMITTING,
     InvoiceStatus.MERKUR_SUBMITTED,
     InvoiceStatus.MERKUR_REIMBURSED,
     InvoiceStatus.MERKUR_REJECTED,

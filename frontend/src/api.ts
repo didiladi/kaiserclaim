@@ -41,6 +41,7 @@ export type InvoiceStatus =
   | "RECEIVED"
   | "OCR_PROCESSING"
   | "READY_FOR_OEGK"
+  | "OEGK_SUBMITTING"
   | "OEGK_SUBMITTED"
   | "OEGK_REFUNDED"
   | "READY_FOR_MERKUR"
@@ -219,6 +220,10 @@ export async function uploadInvoice(
 
 export function submitToMerkur(id: string): Promise<Invoice> {
   return apiFetch<Invoice>(`/invoices/${id}/submit-merkur`, { method: "POST" });
+}
+
+export function submitToOegk(id: string): Promise<Invoice> {
+  return apiFetch<Invoice>(`/invoices/${id}/submit-oegk`, { method: "POST" });
 }
 
 export function correctInvoice(

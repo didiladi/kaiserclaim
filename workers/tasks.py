@@ -8,6 +8,7 @@ the true pipeline state.
 import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from celery import Celery
 from celery.exceptions import MaxRetriesExceededError
@@ -17,6 +18,7 @@ from core.config import get_settings
 from core.database import AsyncSessionLocal
 from models.domain import BenefitKind, BenefitRule, BenefitUsage, InsuredPerson, Invoice, InvoiceStatus, MerkurDocument, MerkurResultState, ResetPeriod, Tariff, User
 from sqlalchemy import func, select, update
+from schemas.payload import first_submission_status
 from services.ocr_engine import pdf_to_text
 from services.regex_parser import parse_pharmacy_receipt
 from services.rksv_parser import extract_rksv_from_image
@@ -46,6 +48,10 @@ celery_app.conf.beat_schedule = {
         "task": "workers.tasks.scan_unused_benefits",
         "schedule": crontab(hour=8, minute=0),
     },
+    "oegk-refund-poll-daily": {
+        "task": "workers.tasks.poll_oegk_refunds",
+        "schedule": crontab(hour=9, minute=0),
+    },
 }
 
 
@@ -63,6 +69,22 @@ async def _set_status(invoice_id: str, status: InvoiceStatus) -> None:
         if invoice:
             invoice.status = status
             await db.commit()
+
+
+_VIENNA = ZoneInfo("Europe/Vienna")
+
+
+def _portal_date(dt: datetime | None) -> str:
+    """DD.MM.YYYY as the portals expect it, in Vienna local time.
+
+    Invoice.date is timestamptz and comes back in UTC, so a receipt stamped
+    00:30 Vienna time would otherwise be submitted as the previous day.
+    """
+    if dt is None:
+        return ""
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_VIENNA)
+    return dt.strftime("%d.%m.%Y")
 
 
 async def _get_invoice(invoice_id: str) -> Invoice | None:
@@ -147,7 +169,7 @@ def run_ocr(self, invoice_id: str) -> dict:
         next_status = (
             InvoiceStatus.NEEDS_REVIEW
             if date is None or amount is None
-            else InvoiceStatus.READY_FOR_MERKUR
+            else first_submission_status(invoice.category)
         )
 
         async def _update():
@@ -156,7 +178,7 @@ def run_ocr(self, invoice_id: str) -> dict:
                 if inv:
                     inv.amount = amount
                     inv.date = date
-                    # Pharmacy receipts skip ÖGK — go straight to Merkur
+                    # Pharmacy / uncategorised receipts skip ÖGK; other categories go to ÖGK first
                     inv.status = next_status
                     await db.commit()
 
@@ -216,7 +238,7 @@ def submit_to_merkur(self, invoice_id: str) -> dict:
             print(f"[DRY RUN] Skipping Merkur portal submission for invoice {invoice_id}", flush=True)
         else:
             bot = MerkurBot()
-            date_str = invoice.date.strftime("%d.%m.%Y") if invoice.date else ""
+            date_str = _portal_date(invoice.date)
             success = _run(bot.submit_pharmacy_receipt(
                 invoice_pdf=invoice.file_path,
                 amount=invoice.amount or 0.0,
@@ -240,34 +262,58 @@ def submit_to_merkur(self, invoice_id: str) -> dict:
         raise
 
 
-@celery_app.task(bind=True, max_retries=5, default_retry_delay=300)
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=120)
 def submit_to_oegk(self, invoice_id: str) -> dict:
-    """Submit invoice to ÖGK (persistent context, user handles 2FA)."""
+    """Submit invoice to ÖGK (persistent context, user handles 2FA).
+
+    Same idempotency contract as submit_to_merkur: READY_FOR_OEGK ->
+    OEGK_SUBMITTING is claimed atomically BEFORE the portal is touched, and any
+    failure after the claim marks the invoice FAILED without a Celery retry,
+    because the click may already have reached the real portal. Only the
+    pre-claim invoice lookup is safe to retry.
+    """
     try:
         invoice = _run(_get_invoice(invoice_id))
         if not invoice:
             raise ValueError(f"Invoice {invoice_id} not found")
+    except Exception as exc:
+        raise self.retry(exc=exc)
 
+    if invoice.status != InvoiceStatus.READY_FOR_OEGK:
+        return {
+            "invoice_id": invoice_id,
+            "status": invoice.status.value,
+            "skipped": True,
+            "reason": f"invoice not in READY_FOR_OEGK (was {invoice.status.value})",
+        }
+
+    if invoice.amount is None or invoice.date is None:
+        _run(_set_status(invoice_id, InvoiceStatus.NEEDS_REVIEW))
+        return {"invoice_id": invoice_id, "status": "NEEDS_REVIEW", "skipped": True}
+
+    claimed = _run(_try_transition(
+        invoice_id, InvoiceStatus.READY_FOR_OEGK, InvoiceStatus.OEGK_SUBMITTING
+    ))
+    if not claimed:
+        return {"invoice_id": invoice_id, "status": "OEGK_SUBMITTING", "skipped": True}
+
+    try:
         bot = OegkBot()
-        date_str = invoice.date.strftime("%d.%m.%Y") if invoice.date else ""
         success = _run(bot.submit_invoice(
             invoice_pdf=invoice.file_path,
-            amount=invoice.amount or 0.0,
-            date=date_str,
+            amount=invoice.amount,
+            date=_portal_date(invoice.date),
         ))
-
         if not success:
+            # The click may or may not have gone through — fail, do not retry.
             raise RuntimeError("ÖGK submission did not return a success signal")
 
         _run(_set_status(invoice_id, InvoiceStatus.OEGK_SUBMITTED))
         return {"invoice_id": invoice_id, "status": "OEGK_SUBMITTED"}
 
-    except Exception as exc:
-        try:
-            raise self.retry(exc=exc)
-        except MaxRetriesExceededError:
-            _run(_set_status(invoice_id, InvoiceStatus.FAILED))
-            raise
+    except Exception:
+        _run(_set_status(invoice_id, InvoiceStatus.FAILED))
+        raise
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
@@ -510,34 +556,61 @@ async def _scan_unused_benefits_async() -> dict:
     return {"reminders_due": reminder_count}
 
 
-@celery_app.task(bind=True, max_retries=10, default_retry_delay=600)
+async def _oegk_submitted_ids(invoice_id: str | None = None) -> list[tuple[str, str]]:
+    """(invoice_id, user_id) of invoices awaiting an ÖGK refund."""
+    async with AsyncSessionLocal() as db:
+        stmt = select(Invoice.id, Invoice.user_id).where(Invoice.status == InvoiceStatus.OEGK_SUBMITTED)
+        if invoice_id:
+            stmt = stmt.where(Invoice.id == invoice_id)
+        rows = (await db.execute(stmt)).all()
+        return [(str(r[0]), str(r[1])) for r in rows]
+
+
+@celery_app.task
+def poll_oegk_refunds() -> dict:
+    """Daily: fan out poll_oegk_refund for every invoice waiting on ÖGK."""
+    waiting = _run(_oegk_submitted_ids())
+    for invoice_id, _ in waiting:
+        poll_oegk_refund.delay(invoice_id)
+    return {"polled": len(waiting)}
+
+
+@celery_app.task(bind=True)
 def poll_oegk_refund(self, invoice_id: str) -> dict:
-    """Poll ÖGK portal for refund PDF; retries up to ~100 min (10 × 10 min)."""
-    try:
-        invoice = _run(_get_invoice(invoice_id))
-        if not invoice:
-            raise ValueError(f"Invoice {invoice_id} not found")
+    """Check the ÖGK portal for a refund PDF for an OEGK_SUBMITTED invoice.
 
-        # Output directory is derived server-side (same pattern as
-        # sync_merkur_inbox) rather than trusted from an external caller.
-        output_dir = Path(settings.storage_root) / str(invoice.user_id) / "oegk_refunds"
-        output_dir.mkdir(parents=True, exist_ok=True)
+    No Celery retry loop: refunds take days or weeks, so poll_oegk_refunds
+    simply asks again tomorrow. The portal does not (yet) tell us which
+    invoice a refund document belongs to, so the invoice only advances when it
+    is the user's single invoice awaiting a refund; with several in flight the
+    PDF is saved but the invoices stay put for manual matching.
+    """
+    invoice = _run(_get_invoice(invoice_id))
+    if not invoice:
+        raise ValueError(f"Invoice {invoice_id} not found")
+    if invoice.status != InvoiceStatus.OEGK_SUBMITTED:
+        return {"invoice_id": invoice_id, "status": invoice.status.value, "skipped": True}
 
-        bot = OegkBot()
-        refund_path = _run(bot.download_refund_pdf(str(output_dir)))
+    # Output directory is derived server-side, never taken from a caller.
+    output_dir = Path(settings.storage_root) / str(invoice.user_id) / "oegk_refunds"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-        if not refund_path:
-            raise self.retry(exc=RuntimeError("Refund PDF not yet available"))
+    refund_path = _run(OegkBot().download_refund_pdf(str(output_dir)))
+    if not refund_path:
+        return {"invoice_id": invoice_id, "status": "OEGK_SUBMITTED", "refund": "pending"}
 
-        async def _mark_refunded():
-            async with AsyncSessionLocal() as db:
-                inv = await db.get(Invoice, invoice_id)
-                if inv:
-                    inv.status = InvoiceStatus.OEGK_REFUNDED
-                    await db.commit()
+    in_flight = [
+        i for i, u in _run(_oegk_submitted_ids()) if u == str(invoice.user_id)
+    ]
+    if len(in_flight) != 1:
+        return {
+            "invoice_id": invoice_id,
+            "status": "OEGK_SUBMITTED",
+            "refund_pdf": refund_path,
+            "refund": "needs_manual_match",
+        }
 
-        _run(_mark_refunded())
-        return {"invoice_id": invoice_id, "refund_pdf": refund_path, "status": "OEGK_REFUNDED"}
-
-    except Exception as exc:
-        raise self.retry(exc=exc)
+    # Refund received: the ÖGK leg is done; the Merkur leg is ready to submit.
+    _run(_set_status(invoice_id, InvoiceStatus.OEGK_REFUNDED))
+    _run(_set_status(invoice_id, InvoiceStatus.READY_FOR_MERKUR))
+    return {"invoice_id": invoice_id, "status": "READY_FOR_MERKUR", "refund_pdf": refund_path}
