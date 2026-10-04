@@ -20,7 +20,8 @@ cd "$(dirname "$0")/.."
 NS=kaiserclaim
 PY="${PYTHON:-.venv/bin/python}"
 
-kubectl -n "$NS" port-forward svc/postgres-svc 15432:5432 >/dev/null &
+# The database is the shared Postgres in namespace `family`, not in kaiserclaim.
+kubectl -n family port-forward svc/postgres-postgresql 15432:5432 >/dev/null &
 PF_DB=$!
 kubectl -n "$NS" port-forward svc/redis-svc 16379:6379 >/dev/null &
 PF_REDIS=$!

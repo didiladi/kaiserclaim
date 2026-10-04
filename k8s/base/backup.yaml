@@ -1,0 +1,118 @@
+# Nightly backup of KaiserClaim's health data to the Synology NAS.
+#
+#   - invoice files / Merkur documents (kaiserclaim-storage PVC) -> tar.gz
+#   - the `kaiserclaim` database                                  -> pg_dump
+#
+# The browser session dirs are excluded on purpose: they hold auth cookies
+# (ÖGK / Merkur) and have no business being on a share.
+# The database also sits inside the shared Postgres' nightly pg_dumpall
+# (home-lab/apps/postgres); this per-database dump makes a single-DB restore easy.
+# Same NFS export and retention (30 copies) as the Vaultwarden backup in home-lab.
+#
+# Restore: see "Backups" in CLAUDE.md.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: kaiserclaim-backup-nfs
+  labels:
+    app: kaiserclaim
+    role: backup
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  mountOptions:
+    - nfsvers=4.1
+    - hard
+    - timeo=600
+  nfs:
+    server: 192.168.10.233
+    path: /volume1/K3S_Backups
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kaiserclaim-backup
+  namespace: kaiserclaim
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  volumeName: kaiserclaim-backup-nfs
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kaiserclaim-backup
+  namespace: kaiserclaim
+spec:
+  schedule: "15 3 * * *"
+  timeZone: Europe/Vienna
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              # Keep the major version >= the server's (home-lab uses 18 for its dumps).
+              image: postgres:18-alpine
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  ts=$(date -u +%Y%m%dT%H%M%SZ)
+                  mkdir -p /backup/kaiserclaim/db /backup/kaiserclaim/storage
+
+                  echo "Dumping database to /backup/kaiserclaim/db/db-${ts}.sql.gz"
+                  # The app's URL uses the asyncpg driver prefix; libpq wants plain postgresql://
+                  pg_dump "$(echo "$DATABASE_URL" | sed 's/+asyncpg//')" \
+                    | gzip > /backup/kaiserclaim/db/db-${ts}.sql.gz.tmp
+                  mv /backup/kaiserclaim/db/db-${ts}.sql.gz.tmp /backup/kaiserclaim/db/db-${ts}.sql.gz
+
+                  echo "Archiving storage to /backup/kaiserclaim/storage/storage-${ts}.tar.gz"
+                  tar -C /data \
+                    --exclude='./.oegk_browser_session' \
+                    --exclude='./.merkur_browser_session' \
+                    -czf /backup/kaiserclaim/storage/storage-${ts}.tar.gz.tmp .
+                  mv /backup/kaiserclaim/storage/storage-${ts}.tar.gz.tmp /backup/kaiserclaim/storage/storage-${ts}.tar.gz
+
+                  echo "Pruning backups older than 30 entries"
+                  ls -1t /backup/kaiserclaim/db/db-*.sql.gz 2>/dev/null | tail -n +31 | xargs -r rm -f
+                  ls -1t /backup/kaiserclaim/storage/storage-*.tar.gz 2>/dev/null | tail -n +31 | xargs -r rm -f
+                  echo "Backup complete"
+                  ls -lh /backup/kaiserclaim/db | tail -3
+                  ls -lh /backup/kaiserclaim/storage | tail -3
+              envFrom:
+                - secretRef:
+                    name: kaiserclaim-secrets
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                  readOnly: true
+                - name: backup
+                  mountPath: /backup
+              resources:
+                requests:
+                  memory: 64Mi
+                  cpu: 10m
+                limits:
+                  memory: 256Mi
+                  cpu: 500m
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: kaiserclaim-storage
+            - name: backup
+              persistentVolumeClaim:
+                claimName: kaiserclaim-backup

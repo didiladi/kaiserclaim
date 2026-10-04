@@ -94,6 +94,17 @@ Every `/api/v1` route (except the webhook, which has its own `X-Webhook-Secret`)
 
 Every table has a `user_id` column. All queries in API endpoints must filter by `current_user.id`.
 
+### Backups
+
+The live database is `kaiserclaim` on the shared Postgres in namespace `family` (`postgres-postgresql`), not a Postgres in this repo's manifests; the repo's placeholder `secret.yaml` does not reflect that. `k8s/base/backup.yaml` adds a nightly CronJob (03:15, 30 copies) that writes to the NAS (`/volume1/K3S_Backups/kaiserclaim/`): `db/db-<ts>.sql.gz` (pg_dump) and `storage/storage-<ts>.tar.gz` (invoice files and Merkur documents; browser session dirs excluded because they hold auth cookies). The shared Postgres also has its own nightly `pg_dumpall` (`home-lab/apps/postgres`). Apply with `kubectl apply -k k8s/overlays/homelab/`.
+
+Restore (check the dump first, restore into an empty DB):
+
+```bash
+gunzip -c db-<ts>.sql.gz | psql "<postgresql URL of an empty database>"
+tar -xzf storage-<ts>.tar.gz -C <storage root>
+```
+
 ### Merkur result reconciliation
 
 `sync_merkur_inbox` (daily 07:00) stores each Postfach result once (`geschaeftsfall_nr` is unique) and links it to exactly one invoice by patient + date + amount (`_process_scraped_doc`). Candidates are invoices in `MERKUR_SUBMITTED`, `MERKUR_SUBMITTING` or `FAILED`: a result arriving is the proof Merkur received a claim whose submit step crashed or missed the success signal, so it rescues those invoices to `MERKUR_REIMBURSED`/`MERKUR_REJECTED`. Stored documents that are still `UNKNOWN` or unlinked are re-evaluated every sync. New results that match no invoice, or several, are not dropped silently: they trigger a notification for manual review.
