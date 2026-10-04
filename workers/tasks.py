@@ -374,12 +374,15 @@ def sync_merkur_inbox(self, full_history: bool = False) -> dict:
     """Scrape Ambulante Abrechnungsinformation data from the Merkur Postfach SPA.
 
     Deduplicates by Geschäftsfall number and matches results back to
-    MERKUR_SUBMITTED (or COMPLETED) invoices.  On a unique match the invoice
-    is transitioned to MERKUR_REIMBURSED / MERKUR_REJECTED.
+    invoices awaiting a result.  On a unique match the invoice is transitioned
+    to MERKUR_REIMBURSED / MERKUR_REJECTED.  Stored documents that are still
+    UNKNOWN or unlinked are re-evaluated on every sync; new results that cannot
+    be matched (or match several invoices) trigger a notification.
     """
     try:
         users = _run(_get_all_users())
         total_new = 0
+        unresolved: list[str] = []
 
         for user in users:
             output_dir = Path(settings.storage_root) / str(user.id) / "merkur_documents"
@@ -393,27 +396,23 @@ def sync_merkur_inbox(self, full_history: bool = False) -> dict:
             docs = _run(bot.download_inbox_documents(str(output_dir), full_history=full_history))
 
             for doc_meta in docs:
-                geschaeftsfall_nr = doc_meta.get("geschaeftsfall_nr")
-                if not geschaeftsfall_nr:
+                outcome, is_new = _run(_process_scraped_doc(user.id, doc_meta))
+                if outcome == "no_id":
                     logger.warning("sync_merkur_inbox: no Geschäftsfall in scraped doc, skipping")
                     continue
+                if is_new:
+                    total_new += 1
+                    if outcome in ("unmatched", "ambiguous"):
+                        unresolved.append(outcome)
 
-                # Dedup: skip if already stored
-                if _run(_merkur_doc_exists(geschaeftsfall_nr)):
-                    continue
+        if unresolved:
+            from services.notifier import notify
 
-                merkur_doc = _run(_create_merkur_document(user.id, doc_meta))
-                total_new += 1
-
-                invoice = _run(_find_matching_invoice(
-                    user_id=user.id,
-                    patient_name=doc_meta.get("patient_name"),
-                    invoice_date=doc_meta.get("invoice_date"),
-                    invoice_amount=doc_meta.get("invoice_amount"),
-                ))
-
-                if invoice:
-                    _run(_link_and_finalize(merkur_doc.id, invoice, doc_meta["result_state"]))
+            ambiguous = unresolved.count("ambiguous")
+            notify(
+                f"KaiserClaim: {len(unresolved)} neue Merkur-Ergebnis(se) keiner Rechnung "
+                f"zugeordnet ({ambiguous} mehrdeutig). Bitte manuell prüfen."
+            )
 
         return {"synced": total_new, "full_history": full_history}
 
@@ -427,12 +426,47 @@ async def _get_all_users() -> list[User]:
         return list(result.scalars().all())
 
 
-async def _merkur_doc_exists(geschaeftsfall_nr: str) -> bool:
+async def _process_scraped_doc(user_id, doc_meta: dict) -> tuple[str, bool]:
+    """Store/refresh one scraped Merkur document and try to link it to an invoice.
+
+    Returns (outcome, is_new) with outcome one of: "no_id", "duplicate",
+    "linked", "unmatched", "ambiguous".
+    """
+    nr = doc_meta.get("geschaeftsfall_nr")
+    if not nr:
+        return "no_id", False
+
     async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(MerkurDocument).where(MerkurDocument.geschaeftsfall_nr == geschaeftsfall_nr)
-        )
-        return result.scalar_one_or_none() is not None
+        existing = (
+            await db.execute(select(MerkurDocument).where(MerkurDocument.geschaeftsfall_nr == nr))
+        ).scalar_one_or_none()
+        if existing is not None:
+            if existing.result_state != MerkurResultState.UNKNOWN and existing.invoice_id is not None:
+                return "duplicate", False
+            # Still undecided or never matched: take the latest scrape and try again.
+            existing.result_state = doc_meta["result_state"]
+            for field in ("invoice_amount", "reimbursed_amount", "patient_name"):
+                if doc_meta.get(field) is not None:
+                    setattr(existing, field, doc_meta[field])
+            await db.commit()
+            doc_id, is_new = existing.id, False
+        else:
+            doc_id, is_new = None, True
+
+    if is_new:
+        doc_id = (await _create_merkur_document(user_id, doc_meta)).id
+
+    invoice, n_matches = await _match_invoice(
+        user_id=user_id,
+        patient_name=doc_meta.get("patient_name"),
+        invoice_date=doc_meta.get("invoice_date"),
+        invoice_amount=doc_meta.get("invoice_amount"),
+        doc_id=doc_id,
+    )
+    if invoice:
+        await _link_and_finalize(doc_id, invoice, doc_meta["result_state"])
+        return "linked", is_new
+    return ("ambiguous" if n_matches > 1 else "unmatched"), is_new
 
 
 async def _create_merkur_document(user_id, doc_meta: dict) -> MerkurDocument:
@@ -456,25 +490,57 @@ async def _create_merkur_document(user_id, doc_meta: dict) -> MerkurDocument:
     return doc
 
 
-async def _find_matching_invoice(
+# Invoices a Merkur result may belong to. MERKUR_SUBMITTING and FAILED are
+# included on purpose: after the submit click a crash or a missed success signal
+# leaves the invoice there even though Merkur accepted the claim, and the result
+# arriving in the Postfach is the only reliable proof of that.
+_MATCHABLE_STATUSES = [
+    InvoiceStatus.MERKUR_SUBMITTED,
+    InvoiceStatus.MERKUR_SUBMITTING,
+    InvoiceStatus.FAILED,
+    InvoiceStatus.COMPLETED,
+]
+_AWAITING_RESULT_STATUSES = {
+    InvoiceStatus.MERKUR_SUBMITTED,
+    InvoiceStatus.MERKUR_SUBMITTING,
+    InvoiceStatus.FAILED,
+}
+
+
+async def _match_invoice(
     user_id,
     patient_name: str | None,
     invoice_date,
     invoice_amount: float | None,
-) -> Invoice | None:
-    """Find an invoice in MERKUR_SUBMITTED or COMPLETED matching patient + date + amount."""
+    doc_id=None,
+) -> tuple[Invoice | None, int]:
+    """Find the invoice matching patient + date + amount.
+
+    Returns (invoice, n_matches): the invoice only when exactly one matches.
+    Invoices already linked to a different document are not candidates.
+    """
     if not invoice_date or invoice_amount is None:
-        return None
+        return None, 0
 
     async with AsyncSessionLocal() as db:
         stmt = select(Invoice).where(
             Invoice.user_id == user_id,
-            Invoice.status.in_([InvoiceStatus.MERKUR_SUBMITTED, InvoiceStatus.COMPLETED]),
+            Invoice.status.in_(_MATCHABLE_STATUSES),
             Invoice.date.isnot(None),
             Invoice.amount.isnot(None),
         )
         result = await db.execute(stmt)
         candidates = result.scalars().all()
+
+        if candidates:
+            claimed = await db.execute(
+                select(MerkurDocument.invoice_id).where(
+                    MerkurDocument.invoice_id.in_([c.id for c in candidates]),
+                    MerkurDocument.id != doc_id if doc_id else True,
+                )
+            )
+            claimed_ids = {row[0] for row in claimed}
+            candidates = [c for c in candidates if c.id not in claimed_ids]
 
     matches = []
     for inv in candidates:
@@ -491,7 +557,7 @@ async def _find_matching_invoice(
                 continue
         matches.append(inv)
 
-    return matches[0] if len(matches) == 1 else None
+    return (matches[0] if len(matches) == 1 else None), len(matches)
 
 
 async def _link_and_finalize(merkur_doc_id, invoice: Invoice, result_state: MerkurResultState) -> None:
@@ -504,7 +570,7 @@ async def _link_and_finalize(merkur_doc_id, invoice: Invoice, result_state: Merk
         doc.invoice_id = inv.id
 
         # Only transition invoices that are still waiting for a result
-        if inv.status == InvoiceStatus.MERKUR_SUBMITTED:
+        if inv.status in _AWAITING_RESULT_STATUSES:
             if result_state == MerkurResultState.REIMBURSED:
                 inv.status = InvoiceStatus.MERKUR_REIMBURSED
                 # Write BenefitUsage with actual reimbursed amount
@@ -520,7 +586,7 @@ async def _link_and_finalize(merkur_doc_id, invoice: Invoice, result_state: Merk
                         ))
             elif result_state == MerkurResultState.REJECTED:
                 inv.status = InvoiceStatus.MERKUR_REJECTED
-            # UNKNOWN: leave in MERKUR_SUBMITTED
+            # UNKNOWN: leave as is; the next sync re-evaluates the stored document
 
         await db.commit()
 

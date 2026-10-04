@@ -94,6 +94,10 @@ Every `/api/v1` route (except the webhook, which has its own `X-Webhook-Secret`)
 
 Every table has a `user_id` column. All queries in API endpoints must filter by `current_user.id`.
 
+### Merkur result reconciliation
+
+`sync_merkur_inbox` (daily 07:00) stores each Postfach result once (`geschaeftsfall_nr` is unique) and links it to exactly one invoice by patient + date + amount (`_process_scraped_doc`). Candidates are invoices in `MERKUR_SUBMITTED`, `MERKUR_SUBMITTING` or `FAILED`: a result arriving is the proof Merkur received a claim whose submit step crashed or missed the success signal, so it rescues those invoices to `MERKUR_REIMBURSED`/`MERKUR_REJECTED`. Stored documents that are still `UNKNOWN` or unlinked are re-evaluated every sync. New results that match no invoice, or several, are not dropped silently: they trigger a notification for manual review.
+
 ### Notifications
 
 `services/notifier.py` posts to Home Assistant's `notify.<HA_NOTIFY_SERVICE>` (Signal). It is a no-op until `HA_URL`, `HA_TOKEN` and `HA_NOTIFY_SERVICE` are real values, and never raises. Every Celery task uses `NotifyOnFailure` (`workers/tasks.py`), which pushes once a task fails for good (retries do not count). `scan_unused_benefits` pushes a digest on Mondays, or daily once a benefit is within 7 days of expiring. Keep messages free of PII.

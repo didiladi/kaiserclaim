@@ -99,8 +99,8 @@ Analysis date: 2026-07-03. Scope: full repo review (architecture, workflows, sec
 - [x] **Wire `scan_unused_benefits` to notifications** (Signal message listing expiring benefits) instead of `print()`. (`tasks.py:354-435`)
 - [x] **Real dashboard numbers (done; also fixed: invoices finalize to MERKUR_REIMBURSED, never COMPLETED, so reimbursed was always ~0):** use `MerkurDocument.reimbursed_amount` where available, label the 82% figure as an estimate where not; default `year` to the current year; aggregate on invoice `date` with `created_at` fallback. (`api/endpoints/stats.py:21, 40, 185, 263`)
 - [ ] **Backups:** nightly pg_dump + storage rsync to the NAS, reusing the home-lab Vaultwarden CronJob pattern (03:00, 30-day retention). This is health data; it must survive node loss.
-- [ ] **Replace `print()` with the `logging` module** and stop logging QR contents/amounts at info level. (`workers/tasks.py`, `workers/playwright_bot.py`)
-- [ ] **Handle stuck `MERKUR_SUBMITTED`:** re-evaluate `UNKNOWN` results on subsequent syncs, and flag ambiguous invoice matches for manual review instead of silently dropping them. (`tasks.py:315-325`)
+- [x] **Replace `print()` with the `logging` module** and stop logging QR contents/amounts at info level. (`workers/tasks.py`, `workers/playwright_bot.py`)
+- [x] **Handle stuck `MERKUR_SUBMITTED` (done; results also rescue FAILED/MERKUR_SUBMITTING invoices):** re-evaluate `UNKNOWN` results on subsequent syncs, and flag ambiguous invoice matches for manual review instead of silently dropping them. (`tasks.py:315-325`)
 
 ### P2: Decide and complete the ÖGK arm
 
