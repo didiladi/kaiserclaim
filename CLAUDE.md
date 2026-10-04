@@ -94,6 +94,10 @@ Every `/api/v1` route (except the webhook, which has its own `X-Webhook-Secret`)
 
 Every table has a `user_id` column. All queries in API endpoints must filter by `current_user.id`.
 
+### Notifications
+
+`services/notifier.py` posts to Home Assistant's `notify.<HA_NOTIFY_SERVICE>` (Signal). It is a no-op until `HA_URL`, `HA_TOKEN` and `HA_NOTIFY_SERVICE` are real values, and never raises. Every Celery task uses `NotifyOnFailure` (`workers/tasks.py`), which pushes once a task fails for good (retries do not count). `scan_unused_benefits` pushes a digest on Mondays, or daily once a benefit is within 7 days of expiring. Keep messages free of PII.
+
 ### Playwright bots
 
 - `MerkurBot` — fully headless, stateless, safe to run in any pod.

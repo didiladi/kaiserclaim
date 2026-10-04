@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from celery import Celery
+from celery import Celery, Task
 from celery.exceptions import MaxRetriesExceededError
 from celery.schedules import crontab
 
@@ -26,10 +26,21 @@ from workers.playwright_bot import MerkurBot, OegkBot
 
 settings = get_settings()
 
+class NotifyOnFailure(Task):
+    """Push a notification when a task fails for good (retries do not count)."""
+
+    def on_failure(self, exc, task_id, args, kwargs, einfo):
+        from services.notifier import notify
+
+        subject = f" ({args[0]})" if args and isinstance(args[0], str) and len(args[0]) == 36 else ""
+        notify(f"KaiserClaim: {self.name.rsplit('.', 1)[-1]}{subject} failed: {type(exc).__name__}")
+
+
 celery_app = Celery(
     "kaiserclaim",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
+    task_cls=NotifyOnFailure,
 )
 celery_app.conf.update(
     task_serializer="json",
@@ -528,15 +539,15 @@ _YEARLY_RESET_PERIODS = {ResetPeriod.CALENDAR_YEAR, ResetPeriod.ONCE_PER_YEAR, R
 async def _scan_unused_benefits_async() -> dict:
     """
     Iterate all per-person BUDGET/PROGRAM benefits with yearly resets.
-    Log any reminders that should fire within the lead window.
+    Collect reminders that should fire within the lead window.
     The dashboard endpoint computes the same logic at query time; this task
-    can be extended later to push notifications or store a reminder model.
+    Due reminders are pushed as one digest via services.notifier.
     """
     from datetime import date
 
     today = date.today()
     current_year = today.year
-    reminder_count = 0
+    reminders: list[tuple[str, str, int]] = []  # (benefit, person, days_until)
 
     async with AsyncSessionLocal() as db:
         rules_result = await db.execute(
@@ -589,9 +600,27 @@ async def _scan_unused_benefits_async() -> dict:
                     f" ({person_name}) — {days_until}d until reset ({reset_date})",
                     flush=True,
                 )
-                reminder_count += 1
+                reminders.append((rule.benefit_name, person_name, days_until))
 
-    return {"reminders_due": reminder_count}
+    pushed = False
+    if _should_push_reminders(reminders, today):
+        from services.notifier import notify
+
+        reminders.sort(key=lambda r: r[2])
+        lines = [f"- {b} ({p}): noch {d} Tage" for b, p, d in reminders[:8]]
+        more = f"\n... und {len(reminders) - 8} weitere" if len(reminders) > 8 else ""
+        msg = "KaiserClaim: Leistungen verfallen bald ungenutzt\n" + "\n".join(lines) + more
+        pushed = await asyncio.to_thread(notify, msg)
+
+    return {"reminders_due": len(reminders), "pushed": pushed}
+
+
+def _should_push_reminders(reminders: list, today) -> bool:
+    """The scan runs daily but the lead window is weeks long: push a digest on
+    Mondays, and every day once something is within a week of expiring."""
+    if not reminders:
+        return False
+    return today.weekday() == 0 or any(days <= 7 for _, _, days in reminders)
 
 
 async def _oegk_submitted_ids(invoice_id: str | None = None) -> list[tuple[str, str]]:

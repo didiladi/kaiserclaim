@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     # uses it to fetch invoice files that live on the cluster's volume.
     api_base_url: str = ""
 
+    # Home Assistant notify service used for failure and reminder pushes (Signal).
+    # All three must be set for notifications to be sent; otherwise they are dropped.
+    ha_url: str = ""
+    ha_token: str = ""
+    ha_notify_service: str = ""  # e.g. the name after "notify." in HA
+
     # Static bearer token every /api/v1 request (except the webhook, which has
     # its own secret) must send as `Authorization: Bearer <token>`. Empty (the
     # default) rejects all requests: auth fails closed, it must be set explicitly.
