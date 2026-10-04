@@ -2,6 +2,8 @@ export const USER_ID = "00000000-0000-0000-0000-000000000001";
 
 const BASE = "/api/v1";
 
+export const CURRENT_YEAR = new Date().getFullYear();
+
 // ---------------------------------------------------------------------------
 // Auth: static bearer token, kept in localStorage (a per-device convenience;
 // the page works, just logged out, if storage is unavailable).
@@ -195,6 +197,10 @@ export interface DashboardSummary {
   total_reimbursed: number;
   in_progress_count: number;
   eigenanteil: number;
+  reimbursed_confirmed: number; // real amounts from Merkur
+  reimbursed_estimated: number; // 82% estimate where no Merkur result is linked yet
+  pending_amount: number;
+  needs_attention_count: number;
   benefit_alerts: { benefit_name: string; percent_used: number; used: number; limit: number }[];
   unused_alerts: UnusedAlert[];
 }
@@ -210,6 +216,11 @@ export interface YearlyStats {
   total_paid: number;
   total_reimbursed: number;
   eigenanteil: number;
+  in_progress_count: number;
+  reimbursed_confirmed: number; // real amounts from Merkur
+  reimbursed_estimated: number; // 82% estimate where no Merkur result is linked yet
+  pending_amount: number;
+  needs_attention_count: number;
 }
 
 export interface MemberStats {
@@ -221,6 +232,11 @@ export interface MemberStats {
   total_paid: number;
   total_reimbursed: number;
   eigenanteil: number;
+  in_progress_count: number;
+  reimbursed_confirmed: number; // real amounts from Merkur
+  reimbursed_estimated: number; // 82% estimate where no Merkur result is linked yet
+  pending_amount: number;
+  needs_attention_count: number;
   share_pct: number;
   categories: { name: string; amount: number }[];
 }
@@ -347,12 +363,12 @@ export function createFamilyMember(data: { member_key: string; name: string; col
 // Dashboard & stats
 // ---------------------------------------------------------------------------
 
-export function getDashboardSummary(year = 2026, member_key?: string): Promise<DashboardSummary> {
+export function getDashboardSummary(year = CURRENT_YEAR, member_key?: string): Promise<DashboardSummary> {
   const qs = `year=${year}${member_key ? `&member_key=${member_key}` : ""}`;
   return apiFetch<DashboardSummary>(`/dashboard/summary?${qs}`);
 }
 
-export function getMonthlyStats(year = 2026, member_key?: string): Promise<MonthlyStats[]> {
+export function getMonthlyStats(year = CURRENT_YEAR, member_key?: string): Promise<MonthlyStats[]> {
   const qs = `year=${year}${member_key ? `&member_key=${member_key}` : ""}`;
   return apiFetch<MonthlyStats[]>(`/stats/monthly?${qs}`);
 }
@@ -361,7 +377,7 @@ export function getYearlyStats(): Promise<YearlyStats[]> {
   return apiFetch<YearlyStats[]>("/stats/yearly");
 }
 
-export function getMemberStats(year = 2026): Promise<MemberStats[]> {
+export function getMemberStats(year = CURRENT_YEAR): Promise<MemberStats[]> {
   return apiFetch<MemberStats[]>(`/stats/members?year=${year}`);
 }
 

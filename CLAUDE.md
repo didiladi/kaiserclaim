@@ -79,7 +79,7 @@ Pharmacy receipts (MVP) skip ÖGK entirely: `run_ocr` sets status to `READY_FOR_
 | POST | `/api/v1/contracts/{id}/parse-pdf` | Parse contract PDF with Gemini |
 | GET | `/api/v1/contracts/{id}/benefits` | Benefit quotas with remaining amounts |
 | GET/POST | `/api/v1/family/` | List / create family members |
-| GET | `/api/v1/dashboard/summary` | Hero figures: `total_paid`, `total_reimbursed` (82% rule), `in_progress_count`, `eigenanteil`, `benefit_alerts` |
+| GET | `/api/v1/dashboard/summary` | Hero figures: `total_paid`, `total_reimbursed` (= `reimbursed_confirmed` from the linked `MerkurDocument` + `reimbursed_estimated` at 82% where none is linked), `eigenanteil` (settled invoices only), `pending_amount`, `in_progress_count`, `needs_attention_count`, `benefit_alerts`. `year` defaults to the current year; invoices are bucketed by their own date in Vienna time |
 | GET | `/api/v1/stats/monthly` | Monthly aggregations, filtered by `year` and `member_key` |
 | GET | `/api/v1/stats/yearly` | Per-year totals |
 | GET | `/api/v1/stats/members` | Per-member breakdown with category split |

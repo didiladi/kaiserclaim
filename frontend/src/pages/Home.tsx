@@ -6,7 +6,7 @@ import { FamilyFilterPills } from "../components/FamilyFilterPills";
 import { InvoiceCard } from "../components/InvoiceCard";
 import { KCCard } from "../components/KCCard";
 import { Button } from "../components/Button";
-import { getDashboardSummary, listInvoices } from "../api";
+import { CURRENT_YEAR, getDashboardSummary, listInvoices } from "../api";
 import type { Invoice, DashboardSummary } from "../api";
 import { formatEUR } from "../lib/format";
 
@@ -37,12 +37,13 @@ export function Home() {
   const activeMemberObj = familyMembers.find((m) => m.member_key === activeMember);
 
   useEffect(() => {
-    getDashboardSummary(2026, memberKey).then(setSummary).catch(() => {});
+    getDashboardSummary(CURRENT_YEAR, memberKey).then(setSummary).catch(() => {});
     listInvoices({ member_key: memberKey }).then((data) => setInvoices(data.slice(0, 5))).catch(() => {});
   }, [activeMember]);
 
   const totalPaid = useCountUp(summary?.total_paid ?? 0);
   const totalReimbursed = summary?.total_reimbursed ?? 0;
+  const isEstimate = (summary?.reimbursed_estimated ?? 0) > 0; // part of the figure is an 82% estimate
   const inProgressCount = summary?.in_progress_count ?? 0;
   const eigenanteil = summary?.eigenanteil ?? 0;
 
@@ -61,7 +62,7 @@ export function Home() {
           <div className="absolute bottom-0 right-8 w-20 h-20 rounded-full pointer-events-none" style={{ background: "rgba(255,255,255,0.03)", transform: "translateY(20px)" }} />
 
           <p className="text-[12px] text-white/60 mb-1">
-            Gesamtausgaben 2026{activeMemberObj ? ` — ${activeMemberObj.name.split(" ")[0]}` : ""}
+            Gesamtausgaben {CURRENT_YEAR}{activeMemberObj ? ` — ${activeMemberObj.name.split(" ")[0]}` : ""}
           </p>
           <p className="text-[44px] font-bold text-white tabular-nums leading-none mb-4" style={{ letterSpacing: "-0.02em" }}>
             {formatEUR(totalPaid)}
@@ -69,7 +70,7 @@ export function Home() {
 
           <div className="flex gap-2">
             {[
-              { label: "Erstattet", value: formatEUR(totalReimbursed) },
+              { label: "Erstattet", value: `${isEstimate ? "≈ " : ""}${formatEUR(totalReimbursed)}` },
               { label: "In Bearbeitung", value: String(inProgressCount) },
               { label: "Eigenanteil", value: formatEUR(eigenanteil) },
             ].map(({ label, value }) => (
