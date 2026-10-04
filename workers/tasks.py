@@ -9,6 +9,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+import logging
 
 from celery import Celery, Task
 from celery.exceptions import MaxRetriesExceededError
@@ -25,6 +26,7 @@ from services.rksv_parser import extract_rksv_from_image
 from workers.playwright_bot import MerkurBot, OegkBot
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 class NotifyOnFailure(Task):
     """Push a notification when a task fails for good (retries do not count)."""
@@ -193,18 +195,20 @@ def run_ocr(self, invoice_id: str) -> dict:
         # Try fast RKSV QR extraction first (images only)
         from services.rksv_parser import extract_qr_codes
         qr_raw = extract_qr_codes(invoice.file_path)
-        print(f"QR codes found: {qr_raw}", flush=True)
+        logger.debug("run_ocr %s: %d QR code(s) found", invoice_id, len(qr_raw or []))  # never log QR contents
         rksv = extract_rksv_from_image(invoice.file_path)
 
         if rksv:
             date, amount = rksv.date, rksv.amount
-            print(f"RKSV QR decoded: date={date} amount={amount}", flush=True)
+            logger.info("run_ocr %s: RKSV QR decoded", invoice_id)
+            logger.debug("run_ocr %s: date=%s amount=%s", invoice_id, date, amount)
         else:
             # Fall back to full OCR + regex
             text = _run(pdf_to_text(invoice.file_path))
             parsed = parse_pharmacy_receipt(text)
             date, amount = parsed.date, parsed.amount
-            print(f"OCR fallback: date={date} amount={amount}", flush=True)
+            logger.info("run_ocr %s: no RKSV QR, used OCR text fallback", invoice_id)
+            logger.debug("run_ocr %s: date=%s amount=%s", invoice_id, date, amount)
 
         # Missing date or amount means we can't safely advance the invoice —
         # route it to a human instead of silently submitting a 0.00 claim.
@@ -277,7 +281,7 @@ def submit_to_merkur(self, invoice_id: str) -> dict:
 
     try:
         if settings.merkur_dry_run:
-            print(f"[DRY RUN] Skipping Merkur portal submission for invoice {invoice_id}", flush=True)
+            logger.info("[DRY RUN] Skipping Merkur portal submission for invoice %s", invoice_id)
         else:
             bot = MerkurBot()
             date_str = _portal_date(invoice.date)
@@ -382,7 +386,7 @@ def sync_merkur_inbox(self, full_history: bool = False) -> dict:
             output_dir.mkdir(parents=True, exist_ok=True)
 
             if settings.merkur_dry_run:
-                print(f"[DRY RUN] Skipping Merkur inbox sync for user {user.id}", flush=True)
+                logger.info("[DRY RUN] Skipping Merkur inbox sync for user %s", user.id)
                 continue
 
             bot = MerkurBot()
@@ -391,7 +395,7 @@ def sync_merkur_inbox(self, full_history: bool = False) -> dict:
             for doc_meta in docs:
                 geschaeftsfall_nr = doc_meta.get("geschaeftsfall_nr")
                 if not geschaeftsfall_nr:
-                    print(f"[sync_merkur_inbox] No Geschäftsfall in scraped doc — skipping", flush=True)
+                    logger.warning("sync_merkur_inbox: no Geschäftsfall in scraped doc, skipping")
                     continue
 
                 # Dedup: skip if already stored
@@ -595,10 +599,9 @@ async def _scan_unused_benefits_async() -> dict:
 
             if should_alert:
                 person_name = person_names.get(str(rule.tariff_id), "unbekannt")
-                print(
-                    f"[scan_unused_benefits] REMINDER: {rule.benefit_name}"
-                    f" ({person_name}) — {days_until}d until reset ({reset_date})",
-                    flush=True,
+                logger.info(
+                    "scan_unused_benefits: %s due in %dd (reset %s)",
+                    rule.benefit_name, days_until, reset_date,
                 )
                 reminders.append((rule.benefit_name, person_name, days_until))
 

@@ -6,9 +6,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.config import get_settings
+from core.logging import setup_logging
 from api.endpoints import invoices, contracts, webhooks, family, stats, merkur
 
 settings = get_settings()
+setup_logging()
 
 app = FastAPI(
     title=settings.app_name,

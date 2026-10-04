@@ -8,6 +8,7 @@ Playwright automation bots.
   survives across runs (the user authenticates once; subsequent runs reuse cookies).
 """
 import asyncio
+import logging
 from pathlib import Path
 
 from playwright.async_api import async_playwright, BrowserContext, Page
@@ -15,6 +16,7 @@ from playwright.async_api import async_playwright, BrowserContext, Page
 from core.config import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 _MERKUR_USER_DATA_DIR = Path(settings.storage_root) / ".merkur_browser_session"
 _OEGK_USER_DATA_DIR = Path(settings.storage_root) / ".oegk_browser_session"
@@ -357,7 +359,7 @@ class MerkurBot:
                         "md-list-item", timeout=20_000
                     )
                 except Exception:
-                    print("[MerkurBot] Inbox list items did not appear — inbox may be empty", flush=True)
+                    logger.warning("MerkurBot: inbox list items did not appear, inbox may be empty")
 
                 if full_history:
                     await self._expand_all_years(page)
@@ -386,7 +388,7 @@ class MerkurBot:
             await page.wait_for_timeout(1_000)
         await self._ensure_logged_in(page, fallback_url=kporclient_base)
         await page.wait_for_load_state("networkidle", timeout=20_000)
-        print(f"[MerkurBot] kporclient session primed (url={page.url})", flush=True)
+        logger.info("MerkurBot: kporclient session primed (url=%s)", page.url)
 
     async def _dismiss_notification_popup(self, page: Page) -> None:
         """Dismiss the 'Benachrichtigungen aktivieren?' dialog if it appears."""
@@ -434,7 +436,7 @@ class MerkurBot:
         results: list[dict] = []
         seen_geschaeftsfaelle: set[str] = set()
 
-        print(f"[MerkurBot] Inbox page URL: {page.url}", flush=True)
+        logger.info("MerkurBot: inbox page URL: %s", page.url)
 
         # Extract gevoid + display metadata from AngularJS scope for all rows at once,
         # before navigating anywhere.  The inbox is an AngularJS (1.x) app so
@@ -474,7 +476,7 @@ class MerkurBot:
                 deduped_items.append(it)
         raw_items = deduped_items
 
-        print(f"[MerkurBot] Found {len(raw_items)} unique gevoid(s) in inbox", flush=True)
+        logger.info("MerkurBot: found %d unique gevoid(s) in inbox", len(raw_items))
 
         if not raw_items:
             return results
@@ -494,7 +496,7 @@ class MerkurBot:
             panels_text: list[str] = []
 
             if not gevoid:
-                print(f"[MerkurBot] No gevoid for '{title}' — skipping", flush=True)
+                logger.warning("MerkurBot: inbox item has no gevoid, skipping")
                 continue
 
             # Navigate the existing page to the summary URL rather than opening a new
@@ -517,15 +519,9 @@ class MerkurBot:
                 if f"gevoid={gevoid}" not in page.url:
                     await page.goto(summary_url, wait_until="networkidle", timeout=20_000)
                 panels_text = await self._scrape_summary_page(page)
-                print(
-                    f"[MerkurBot] gevoid={gevoid}: {len(panels_text)} panel(s) scraped",
-                    flush=True,
-                )
+                logger.info("MerkurBot: gevoid=%s: %d panel(s) scraped", gevoid, len(panels_text))
             except Exception as exc:
-                print(
-                    f"[MerkurBot] Summary page failed (gevoid={gevoid}): {exc}",
-                    flush=True,
-                )
+                logger.warning("MerkurBot: summary page failed (gevoid=%s): %s", gevoid, exc)
                 continue
 
             for panel_text in panels_text:
@@ -611,7 +607,7 @@ class OegkBot:
         # If the session has expired the portal will redirect to the ID-Austria
         # login page — the user completes 2FA interactively; we wait up to 3 min.
         if "login" in page.url or "anmelden" in page.url:
-            print("[OegkBot] 2FA required — please authenticate in the browser window.")
+            logger.warning("OegkBot: 2FA required, please authenticate in the browser window")
             await page.wait_for_url(f"{_OEGK_PORTAL_URL}/**", timeout=180_000)
 
         await page.click("text=Leistungsabrechnung")
