@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { Send, CheckCircle, XCircle } from "lucide-react";
-import { getInvoice, submitToMerkur, submitToOegk } from "../api";
+import { getInvoice, submitToMerkur, markOegkSubmitted } from "../api";
 import type { Invoice } from "../api";
 import { useAppContext } from "../state/AppContext";
 import { StatusPill } from "../components/StatusPill";
@@ -68,14 +68,14 @@ export function InvoiceDetail() {
     }
   };
 
-  const handleOegk = async () => {
+  const handleOegkMarked = async () => {
     if (!id) return;
     setSubmitting(true);
     try {
-      const updated = await submitToOegk(id);
+      const updated = await markOegkSubmitted(id);
       setInvoice(updated);
     } catch {
-      setError("Übermittlung fehlgeschlagen");
+      setError("Status konnte nicht gespeichert werden");
     } finally {
       setSubmitting(false);
     }
@@ -104,6 +104,20 @@ export function InvoiceDetail() {
           <Row label="Hochgeladen am" value={formatDate(invoice.created_at)} />
         </div>
       </KCCard>
+
+      {/* ÖGK refund card (shown as soon as the refund PDF is matched) */}
+      {invoice.oegk_reimbursed_amount != null && (
+        <KCCard>
+          <div className="flex items-center gap-3 px-4 py-3 rounded-t-lg border-b border-kc-borderLight bg-green-50">
+            <CheckCircle size={20} className="text-green-600 shrink-0" />
+            <span className="text-[14px] font-semibold text-green-700">ÖGK hat erstattet</span>
+          </div>
+          <div className="flex items-center justify-between px-4 py-3">
+            <span className="text-[13px] text-kc-textSec">Erstattungsbetrag</span>
+            <span className="text-[18px] font-bold text-green-700">{formatEUR(invoice.oegk_reimbursed_amount)}</span>
+          </div>
+        </KCCard>
+      )}
 
       {/* Merkur result card */}
       {(invoice.status === "MERKUR_REIMBURSED" || invoice.status === "MERKUR_REJECTED") && (
@@ -134,7 +148,7 @@ export function InvoiceDetail() {
             <div className="flex items-center justify-between px-4 py-2 border-t border-kc-borderLight">
               <span className="text-[13px] text-kc-textSec">Eigenanteil</span>
               <span className="text-[14px] font-medium text-kc-textSec">
-                {formatEUR(invoice.amount - invoice.reimbursed_amount)}
+                {formatEUR(invoice.amount - invoice.reimbursed_amount - (invoice.oegk_reimbursed_amount ?? 0))}
               </span>
             </div>
           )}
@@ -143,9 +157,14 @@ export function InvoiceDetail() {
 
       {/* Submit CTAs (ÖGK first, then Merkur) */}
       {invoice.status === "READY_FOR_OEGK" && (
-        <Button fullWidth size="lg" onClick={handleOegk} loading={submitting}>
-          Bei ÖGK einreichen
-        </Button>
+        <div className="flex flex-col gap-2">
+          <p className="text-[13px] text-kc-textSec">
+            Reiche den Beleg selbst in meine ÖGK ein und bestätige das hier. Die Erstattung wird danach automatisch zugeordnet.
+          </p>
+          <Button fullWidth size="lg" onClick={handleOegkMarked} loading={submitting}>
+            Als bei ÖGK eingereicht markieren
+          </Button>
+        </div>
       )}
       {(invoice.status === "OEGK_REFUNDED" || invoice.status === "READY_FOR_MERKUR") && (
         <Button fullWidth size="lg" onClick={handleMerkur} loading={submitting}>

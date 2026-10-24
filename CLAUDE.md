@@ -50,9 +50,11 @@ OCR finds no amount/date → NEEDS_REVIEW (fix via PATCH /invoices/{id}); any fa
 
 **ÖGK refunds** (meine ÖGK): `poll_oegk_refunds` (beat, 09:00, cluster) queues one `sync_oegk_refunds(user_id)` per user with invoices waiting on ÖGK (`READY_FOR_OEGK`, `OEGK_SUBMITTING`, `OEGK_SUBMITTED`, `FAILED`; the task expires after 20 h). The sync runs on the `oegk` queue (the cluster worker never consumes it) because `OegkBot` is headed for ID-Austria 2FA: run `scripts/run_oegk_worker.sh` on the desktop. `OegkBot.download_refunds` downloads every PDF in "Eingereichte Rechnungen", and each is sent to `POST /oegk/refund-pdfs` (via `API_BASE_URL`; without it the worker ingests directly, for single-host dev). The cluster owns the files because the Merkur upload reads them. `services/oegk_ingest.py` parses the PDF (`services/oegk_result_parser.py`), dedupes it (no case number: `OegkDocument.dedupe_key` hashes patient, doctor, dates and amounts), and matches an invoice on **patient + treatment day (Vienna) within the PDF's service range + invoice amount**; the patient is the `FamilyMember.svnr` when stored, else a name check. Exactly one match: the PDF becomes an `InvoiceAttachment` (`oegk_refund`) and the invoice jumps to `READY_FOR_MERKUR`. Zero or several matches: the PDF is stored, a notification fires once, and it is retried on every sync (it links as soon as the invoice exists). `submit_to_merkur` uploads the invoice's own file plus all attachments in one Vorgang and checks that every file exists *before* claiming the invoice.
 
-**ÖGK submission is switched off** (`OEGK_SUBMIT_ENABLED`, default false): `POST /invoices/{id}/submit-oegk` returns 501 and `submit_to_oegk` is a no-op, because the meine ÖGK submit flow is not calibrated (see "meine ÖGK calibration status"). The interim path is to submit by hand in meine ÖGK and move the invoice with `PATCH /invoices/{id}/status` to `OEGK_SUBMITTED`; refunds are matched automatically, and unconfirmed `READY_FOR_OEGK` invoices are matched too.
+**ÖGK submission is switched off** (`OEGK_SUBMIT_ENABLED`, default false): `POST /invoices/{id}/submit-oegk` returns 501 and `submit_to_oegk` is a no-op, because the meine ÖGK submit flow is not calibrated (see "meine ÖGK calibration status"). The interim path is to submit by hand in meine ÖGK and move the invoice to `OEGK_SUBMITTED` with the "Als bei ÖGK eingereicht markieren" button on the invoice detail page (`PATCH /invoices/{id}/status`); refunds are matched automatically, and unconfirmed `READY_FOR_OEGK` invoices are matched too.
 
 Pharmacy receipts (MVP) skip ÖGK entirely: `run_ocr` sets status to `READY_FOR_MERKUR` directly.
+
+**API response fields**: `InvoiceRead` derives `pipeline`, `current_step`, `reimbursed_amount`, `result_state` and `oegk_reimbursed_amount` in a `model_validator(mode="before")`. Do not go back to overriding `model_validate`: FastAPI validates responses through a TypeAdapter and never calls it (that silently left every field at its default). Endpoints that return invoices must eager-load `merkur_document` and `oegk_document`.
 
 **Pipeline variant detection** — computed at read time in `schemas/payload.py` (`_derive_pipeline`). If `invoice.category` contains "medikament" or "apotheke" (case-insensitive), the invoice is `pharmacy`; otherwise `standard`. Pharmacy path shows 5 stepper steps in the UI; standard shows all 8.
 
@@ -74,7 +76,7 @@ Pharmacy receipts (MVP) skip ÖGK entirely: `run_ocr` sets status to `READY_FOR_
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/api/v1/invoices/upload` | Upload invoice file → triggers OCR worker |
-| GET | `/api/v1/invoices/` | List invoices with `member_key`, `status_group`, `search` filters |
+| GET | `/api/v1/invoices/` | List invoices with `member_key`, `status_group`, `search`, `pipeline` filters |
 | GET | `/api/v1/invoices/{id}` | Get single invoice |
 | PATCH | `/api/v1/invoices/{id}` | Correct amount/date/provider/patient (NEEDS_REVIEW recovery) |
 | POST | `/api/v1/invoices/{id}/submit-oegk` | Queue ÖGK submission (READY_FOR_OEGK only). 501 while `OEGK_SUBMIT_ENABLED` is off |
@@ -85,7 +87,7 @@ Pharmacy receipts (MVP) skip ÖGK entirely: `run_ocr` sets status to `READY_FOR_
 | POST | `/api/v1/contracts/{id}/parse-pdf` | Parse contract PDF with Gemini |
 | GET | `/api/v1/contracts/{id}/benefits` | Benefit quotas with remaining amounts |
 | GET/POST | `/api/v1/family/` | List / create family members |
-| GET | `/api/v1/dashboard/summary` | Hero figures: `total_paid`, `total_reimbursed` (= `reimbursed_confirmed` from the linked `MerkurDocument` + `reimbursed_estimated` at 82% where none is linked), `eigenanteil` (settled invoices only), `pending_amount`, `in_progress_count`, `needs_attention_count`, `benefit_alerts`. `year` defaults to the current year; invoices are bucketed by their own date in Vienna time |
+| GET | `/api/v1/dashboard/summary` | Hero figures, filterable by `member_key` and `pipeline` (`standard` = doctors, `pharmacy`). Refunds add up from two sources: `oegk_refunded` (real, from the linked ÖGK PDF, counted as soon as it is matched) and Merkur (`merkur_refunded` confirmed, plus an estimate of 82% of the invoice minus the ÖGK part where no Merkur result is linked yet). `total_reimbursed` = both, `eigenanteil` = settled invoices only. `claimed_amount` = invoice totals submitted to ÖGK or Merkur, `claimed_open_amount` = of those still undecided, `not_yet_claimed_amount` = not submitted anywhere yet (`pending_amount` = open + not yet claimed). Also `in_progress_count`, `needs_attention_count`, `benefit_alerts`. `year` defaults to the current year; invoices are bucketed by their own date in Vienna time |
 | GET | `/api/v1/stats/monthly` | Monthly aggregations, filtered by `year` and `member_key` |
 | GET | `/api/v1/stats/yearly` | Per-year totals |
 | GET | `/api/v1/stats/members` | Per-member breakdown with category split |

@@ -6,8 +6,9 @@ import { FamilyFilterPills } from "../components/FamilyFilterPills";
 import { InvoiceCard } from "../components/InvoiceCard";
 import { KCCard } from "../components/KCCard";
 import { Button } from "../components/Button";
+import clsx from "clsx";
 import { CURRENT_YEAR, getDashboardSummary, listInvoices } from "../api";
-import type { Invoice, DashboardSummary } from "../api";
+import type { Invoice, DashboardSummary, PipelineFilter } from "../api";
 import { formatEUR } from "../lib/format";
 
 function useCountUp(target: number, duration = 1200) {
@@ -31,15 +32,16 @@ export function Home() {
   const { activeMember, familyMembers } = useAppContext();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [pipeline, setPipeline] = useState<PipelineFilter | undefined>(undefined);
   const navigate = useNavigate();
 
   const memberKey = activeMember === "all" ? undefined : activeMember;
   const activeMemberObj = familyMembers.find((m) => m.member_key === activeMember);
 
   useEffect(() => {
-    getDashboardSummary(CURRENT_YEAR, memberKey).then(setSummary).catch(() => {});
-    listInvoices({ member_key: memberKey }).then((data) => setInvoices(data.slice(0, 5))).catch(() => {});
-  }, [activeMember]);
+    getDashboardSummary(CURRENT_YEAR, memberKey, pipeline).then(setSummary).catch(() => {});
+    listInvoices({ member_key: memberKey, pipeline }).then((data) => setInvoices(data.slice(0, 5))).catch(() => {});
+  }, [activeMember, pipeline]);
 
   const totalPaid = useCountUp(summary?.total_paid ?? 0);
   const totalReimbursed = summary?.total_reimbursed ?? 0;
@@ -50,6 +52,22 @@ export function Home() {
   return (
     <div className="pb-4">
       <FamilyFilterPills />
+
+      {/* Doctors (ÖGK first, then Merkur) vs pharmacy (Merkur only) */}
+      <div className="flex gap-2 px-5 pb-3 -mt-2">
+        {([[undefined, "Alle Belege"], ["standard", "Ärzte"], ["pharmacy", "Apotheke"]] as const).map(([value, label]) => (
+          <button
+            key={label}
+            onClick={() => setPipeline(value)}
+            className={clsx(
+              "px-3 py-1.5 rounded-full text-[13px] font-semibold transition-colors",
+              pipeline === value ? "bg-kc-accent text-white" : "bg-kc-surfaceAlt text-kc-textSec"
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
       {/* Hero card */}
       <div className="mx-5 mb-4">
@@ -80,6 +98,24 @@ export function Home() {
               </div>
             ))}
           </div>
+
+          {/* What has been submitted, and what is still waiting for a decision */}
+          <div className="flex gap-2 mt-2">
+            {[
+              { label: "Eingereicht", value: formatEUR(summary?.claimed_amount ?? 0) },
+              { label: "Davon offen", value: formatEUR(summary?.claimed_open_amount ?? 0) },
+              { label: "Noch nicht eingereicht", value: formatEUR(summary?.not_yet_claimed_amount ?? 0) },
+            ].map(({ label, value }) => (
+              <div key={label} className="flex-1 rounded-xl p-2 text-center" style={{ background: "rgba(255,255,255,0.1)" }}>
+                <p className="text-[10px] text-white/60 mb-0.5">{label}</p>
+                <p className="text-[13px] font-semibold text-white tabular-nums">{value}</p>
+              </div>
+            ))}
+          </div>
+          <p className="text-[11px] text-white/50 mt-2 text-center tabular-nums">
+            Erstattet: ÖGK {formatEUR(summary?.oegk_refunded ?? 0)} · Merkur {formatEUR(summary?.merkur_refunded ?? 0)}
+            {isEstimate ? " (+ Schätzung)" : ""}
+          </p>
         </div>
       </div>
 

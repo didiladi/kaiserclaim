@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from models.domain import Invoice, InvoiceStatus, MerkurDocument, MerkurResultState, User
+from models.domain import Invoice, InvoiceStatus, MerkurDocument, MerkurResultState, OegkDocument, User
 from tests.conftest import _TEST_DB_URL
 
 S = InvoiceStatus
@@ -14,8 +14,8 @@ _VIENNA = ZoneInfo("Europe/Vienna")
 
 
 async def _seed(rows):
-    """rows: dicts with status/amount/date and optional reimbursed (creates a MerkurDocument).
-    Returns the fresh user's id."""
+    """rows: dicts with status/amount/date and optional reimbursed (creates a MerkurDocument),
+    oegk (creates an OegkDocument with that refund) and category. Returns the fresh user's id."""
     engine = create_async_engine(_TEST_DB_URL)
     try:
         async with async_sessionmaker(engine, expire_on_commit=False)() as db:
@@ -29,9 +29,17 @@ async def _seed(rows):
                     status=r["status"],
                     amount=r["amount"],
                     date=r.get("date"),
+                    category=r.get("category"),
                 )
                 db.add(inv)
                 await db.flush()
+                if "oegk" in r:
+                    db.add(OegkDocument(
+                        user_id=user.id,
+                        dedupe_key=str(uuid.uuid4()),
+                        reimbursed_amount=r["oegk"],
+                        invoice_id=inv.id,
+                    ))
                 if "reimbursed" in r:
                     db.add(MerkurDocument(
                         user_id=user.id,
@@ -138,8 +146,125 @@ async def test_yearly_and_monthly_use_same_roll_up(client):
     assert yearly == [{
         "year": 2026, "total_paid": 150.0, "total_reimbursed": 90.0,
         "reimbursed_confirmed": 90.0, "reimbursed_estimated": 0.0,
+        "oegk_refunded": 0.0, "merkur_refunded": 90.0,
         "eigenanteil": 10.0, "pending_amount": 50.0,
+        "claimed_amount": 150.0, "claimed_open_amount": 50.0, "not_yet_claimed_amount": 0.0,
         "in_progress_count": 1, "needs_attention_count": 0,
     }]
     monthly = (await client.get(f"/api/v1/stats/monthly?user_id={uid}&year=2026")).json()
     assert monthly[2]["total"] == 100.0 and monthly[3]["total"] == 50.0
+
+
+# ---------------------------------------------------------------------------
+# Doctor invoices: ÖGK refund + Merkur refund, claimed vs pending
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_oegk_refund_counts_while_invoice_waits_for_merkur(client):
+    uid = await _seed([
+        {"status": S.READY_FOR_MERKUR, "amount": 350.0, "date": _d(2026, 4, 27), "oegk": 62.73},
+    ])
+    s = await _summary(client, uid)
+
+    assert s["oegk_refunded"] == 62.73
+    assert s["total_reimbursed"] == 62.73
+    assert s["claimed_amount"] == 350.0 and s["claimed_open_amount"] == 350.0
+    assert s["not_yet_claimed_amount"] == 0.0
+    assert s["eigenanteil"] == 0.0  # undecided: not out-of-pocket yet
+
+
+@pytest.mark.asyncio
+async def test_final_eigenanteil_subtracts_oegk_and_merkur(client):
+    uid = await _seed([
+        {"status": S.COMPLETED, "amount": 350.0, "date": _d(2026, 4, 27), "oegk": 62.73, "reimbursed": 200.0},
+    ])
+    s = await _summary(client, uid)
+
+    assert s["oegk_refunded"] == 62.73 and s["merkur_refunded"] == 200.0
+    assert s["total_reimbursed"] == 262.73
+    assert s["eigenanteil"] == 87.27
+    assert s["claimed_open_amount"] == 0.0 and s["pending_amount"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_merkur_estimate_leaves_out_the_oegk_part(client):
+    uid = await _seed([
+        {"status": S.MERKUR_REIMBURSED, "amount": 350.0, "date": _d(2026, 4, 27), "oegk": 62.73},
+    ])
+    s = await _summary(client, uid)
+
+    assert s["reimbursed_estimated"] == round(350 * 0.82 - 62.73, 2)  # 224.27
+    assert s["total_reimbursed"] == 287.0  # the 82% estimate overall, not 82% plus ÖGK
+
+
+@pytest.mark.asyncio
+async def test_rejected_by_merkur_still_keeps_the_oegk_refund(client):
+    uid = await _seed([
+        {"status": S.MERKUR_REJECTED, "amount": 350.0, "date": _d(2026, 4, 27), "oegk": 62.73},
+    ])
+    s = await _summary(client, uid)
+
+    assert s["total_reimbursed"] == 62.73
+    assert s["eigenanteil"] == 287.27
+
+
+@pytest.mark.asyncio
+async def test_claimed_vs_not_yet_claimed(client):
+    uid = await _seed([
+        {"status": S.READY_FOR_OEGK, "amount": 100.0, "date": _d(2026, 4, 1)},   # not submitted yet
+        {"status": S.NEEDS_REVIEW, "amount": 40.0, "date": _d(2026, 4, 2)},      # not submitted yet
+        {"status": S.OEGK_SUBMITTED, "amount": 200.0, "date": _d(2026, 4, 3)},   # claimed, open
+        {"status": S.MERKUR_SUBMITTED, "amount": 60.0, "date": _d(2026, 4, 4)},  # claimed, open
+        {"status": S.FAILED, "amount": 999.0, "date": _d(2026, 4, 5)},           # needs attention, in neither
+    ])
+    s = await _summary(client, uid)
+
+    assert s["claimed_amount"] == 260.0 and s["claimed_open_amount"] == 260.0
+    assert s["not_yet_claimed_amount"] == 140.0
+    assert s["pending_amount"] == 400.0  # = claimed open + not yet claimed
+    assert s["needs_attention_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_pipeline_filter_splits_doctors_from_pharmacy(client):
+    uid = await _seed([
+        {"status": S.OEGK_SUBMITTED, "amount": 300.0, "date": _d(2026, 4, 1), "category": "Allgemeinmedizin"},
+        {"status": S.MERKUR_SUBMITTED, "amount": 20.0, "date": _d(2026, 4, 2), "category": "Medikamente"},
+    ])
+    doctors = (await client.get(f"/api/v1/dashboard/summary?user_id={uid}&year=2026&pipeline=standard")).json()
+    pharmacy = (await client.get(f"/api/v1/dashboard/summary?user_id={uid}&year=2026&pipeline=pharmacy")).json()
+    everything = await _summary(client, uid)
+
+    assert doctors["total_paid"] == 300.0 and pharmacy["total_paid"] == 20.0
+    assert everything["total_paid"] == 320.0
+
+
+@pytest.mark.asyncio
+async def test_invoice_list_filters_by_pipeline_and_exposes_oegk_refund(client):
+    uid = await _seed([
+        {"status": S.READY_FOR_MERKUR, "amount": 350.0, "date": _d(2026, 4, 27), "category": "Arzt", "oegk": 62.73},
+        {"status": S.MERKUR_SUBMITTED, "amount": 20.0, "date": _d(2026, 4, 2), "category": "Apotheke"},
+    ])
+    doctors = (await client.get(f"/api/v1/invoices/?user_id={uid}&pipeline=standard")).json()
+    pharmacy = (await client.get(f"/api/v1/invoices/?user_id={uid}&pipeline=pharmacy")).json()
+
+    assert [i["amount"] for i in doctors] == [350.0]
+    assert doctors[0]["oegk_reimbursed_amount"] == 62.73
+    assert [i["amount"] for i in pharmacy] == [20.0]
+    assert pharmacy[0]["oegk_reimbursed_amount"] is None
+
+
+@pytest.mark.asyncio
+async def test_invoice_api_fills_derived_fields_over_http(client):
+    """pipeline, current_step and the refund fields used to stay at their defaults over HTTP."""
+    uid = await _seed([
+        {"status": S.MERKUR_REIMBURSED, "amount": 20.0, "date": _d(2026, 4, 2), "category": "Apotheke", "reimbursed": 15.0},
+    ])
+    inv = (await client.get(f"/api/v1/invoices/?user_id={uid}")).json()[0]
+    detail = (await client.get(f"/api/v1/invoices/{inv['id']}?user_id={uid}")).json()
+
+    for item in (inv, detail):
+        assert item["pipeline"] == "pharmacy"
+        assert item["current_step"] > 0
+        assert item["reimbursed_amount"] == 15.0
+        assert item["result_state"] == "REIMBURSED"

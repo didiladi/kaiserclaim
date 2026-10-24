@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Optional, Literal, List
 
-from pydantic import BaseModel, EmailStr, ConfigDict, Field
+from pydantic import BaseModel, EmailStr, ConfigDict, Field, model_validator
 
 from models.domain import InvoiceStatus, LimitType, MerkurResultState, BenefitKind, ResetPeriod
 
@@ -237,21 +237,37 @@ class InvoiceRead(_Base):
     current_step: int = 0
     reimbursed_amount: Optional[float] = None
     result_state: Optional[str] = None
+    oegk_reimbursed_amount: Optional[float] = None  # from the linked ÖGK refund PDF
 
+    @model_validator(mode="before")
     @classmethod
-    def model_validate(cls, obj, **kwargs):
-        instance = super().model_validate(obj, **kwargs)
-        instance.pipeline = _derive_pipeline(instance.category)
-        instance.current_step = _current_step(instance.status)
-        # Populate reimbursement info from the linked MerkurDocument (if eagerly loaded)
+    def _fill_derived(cls, data):
+        """Fill the derived fields from the ORM object.
+
+        A before-validator, not a model_validate override: FastAPI validates
+        responses through a TypeAdapter, which never calls the override.
+        """
+        if isinstance(data, dict):
+            return data
+        values = {name: getattr(data, name) for name in cls.model_fields if hasattr(data, name)}
+        values["pipeline"] = _derive_pipeline(values.get("category"))
+        values["current_step"] = _current_step(values["status"])
+        # The linked documents are only there when the endpoint loaded them eagerly;
+        # touching an unloaded relationship in async code raises, so ask defensively.
         try:
-            doc = getattr(obj, "merkur_document", None)
+            doc = getattr(data, "merkur_document", None)
             if doc is not None:
-                instance.reimbursed_amount = doc.reimbursed_amount
-                instance.result_state = doc.result_state.value if doc.result_state else None
+                values["reimbursed_amount"] = doc.reimbursed_amount
+                values["result_state"] = doc.result_state.value if doc.result_state else None
         except Exception:
             pass
-        return instance
+        try:
+            oegk_doc = getattr(data, "oegk_document", None)
+            if oegk_doc is not None:
+                values["oegk_reimbursed_amount"] = oegk_doc.reimbursed_amount
+        except Exception:
+            pass
+        return values
 
 
 # ---------------------------------------------------------------------------

@@ -77,6 +77,7 @@ export interface Invoice {
   updated_at: string;
   reimbursed_amount: number | null;
   result_state: "REIMBURSED" | "REJECTED" | "UNKNOWN" | null;
+  oegk_reimbursed_amount: number | null; // from the linked ÖGK refund PDF
 }
 
 export interface MerkurDocument {
@@ -197,9 +198,14 @@ export interface DashboardSummary {
   total_reimbursed: number;
   in_progress_count: number;
   eigenanteil: number;
-  reimbursed_confirmed: number; // real amounts from Merkur
-  reimbursed_estimated: number; // 82% estimate where no Merkur result is linked yet
+  reimbursed_confirmed: number; // real amounts from ÖGK and Merkur
+  reimbursed_estimated: number; // estimate where Merkur's result is not linked yet
+  oegk_refunded: number;
+  merkur_refunded: number; // confirmed only
   pending_amount: number;
+  claimed_amount: number; // invoice totals submitted to ÖGK or Merkur
+  claimed_open_amount: number; // ...of which not decided yet
+  not_yet_claimed_amount: number; // invoice totals not submitted anywhere yet
   needs_attention_count: number;
   benefit_alerts: { benefit_name: string; percent_used: number; used: number; limit: number }[];
   unused_alerts: UnusedAlert[];
@@ -256,9 +262,12 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 // Invoices
 // ---------------------------------------------------------------------------
 
-export function listInvoices(params?: { member_key?: string; status_group?: string; search?: string }): Promise<Invoice[]> {
+export type PipelineFilter = "standard" | "pharmacy";
+
+export function listInvoices(params?: { member_key?: string; status_group?: string; search?: string; pipeline?: PipelineFilter }): Promise<Invoice[]> {
   const qs = new URLSearchParams();
   if (params?.member_key) qs.set("member_key", params.member_key);
+  if (params?.pipeline) qs.set("pipeline", params.pipeline);
   if (params?.status_group) qs.set("status_group", params.status_group);
   if (params?.search) qs.set("search", params.search);
   const q = qs.toString();
@@ -293,8 +302,14 @@ export function submitToMerkur(id: string): Promise<Invoice> {
   return apiFetch<Invoice>(`/invoices/${id}/submit-merkur`, { method: "POST" });
 }
 
-export function submitToOegk(id: string): Promise<Invoice> {
-  return apiFetch<Invoice>(`/invoices/${id}/submit-oegk`, { method: "POST" });
+// ÖGK submission by the bot is switched off (the endpoint answers 501): the user submits in
+// meine ÖGK and confirms it here, which is what lets the refund PDF be matched and counted.
+export function markOegkSubmitted(id: string): Promise<Invoice> {
+  return apiFetch<Invoice>(`/invoices/${id}/status`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "OEGK_SUBMITTED" }),
+  });
 }
 
 export function correctInvoice(
@@ -363,8 +378,8 @@ export function createFamilyMember(data: { member_key: string; name: string; col
 // Dashboard & stats
 // ---------------------------------------------------------------------------
 
-export function getDashboardSummary(year = CURRENT_YEAR, member_key?: string): Promise<DashboardSummary> {
-  const qs = `year=${year}${member_key ? `&member_key=${member_key}` : ""}`;
+export function getDashboardSummary(year = CURRENT_YEAR, member_key?: string, pipeline?: PipelineFilter): Promise<DashboardSummary> {
+  const qs = `year=${year}${member_key ? `&member_key=${member_key}` : ""}${pipeline ? `&pipeline=${pipeline}` : ""}`;
   return apiFetch<DashboardSummary>(`/dashboard/summary?${qs}`);
 }
 

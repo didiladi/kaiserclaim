@@ -1,7 +1,7 @@
 import shutil
 import uuid
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
@@ -14,7 +14,7 @@ from api.dependencies import get_current_user
 from core.config import get_settings
 from core.database import get_db
 from models.domain import FamilyMember, Invoice, InvoiceStatus, User
-from schemas.payload import InvoiceCorrection, InvoiceRead, InvoiceStatusUpdate, first_submission_status
+from schemas.payload import InvoiceCorrection, InvoiceRead, InvoiceStatusUpdate, _derive_pipeline, first_submission_status
 from workers.tasks import run_ocr, submit_to_merkur, submit_to_oegk
 
 _CORRECTABLE_STATUSES = {
@@ -84,6 +84,9 @@ async def list_invoices(
     member_key: str | None = Query(default=None, description="Filter by family member key"),
     status_group: str | None = Query(default=None, description="all | in_progress | completed"),
     search: str | None = Query(default=None, description="Case-insensitive search on provider_name"),
+    pipeline: Literal["standard", "pharmacy"] | None = Query(
+        default=None, description="standard = doctors and other ÖGK-first invoices, pharmacy = Merkur only"
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -106,11 +109,14 @@ async def list_invoices(
         stmt = stmt.where(Invoice.provider_name.ilike(f"%{search}%"))
 
     stmt = (
-        stmt.options(selectinload(Invoice.merkur_document))
+        stmt.options(selectinload(Invoice.merkur_document), selectinload(Invoice.oegk_document))
         .order_by(Invoice.created_at.desc())
     )
     result = await db.execute(stmt)
-    return result.scalars().all()
+    invoices = result.scalars().all()
+    if pipeline:
+        invoices = [i for i in invoices if _derive_pipeline(i.category) == pipeline]
+    return invoices
 
 
 @router.get("/{invoice_id}", response_model=InvoiceRead)
@@ -122,7 +128,7 @@ async def get_invoice(
     invoice = await db.scalar(
         select(Invoice)
         .where(Invoice.id == invoice_id)
-        .options(selectinload(Invoice.merkur_document))
+        .options(selectinload(Invoice.merkur_document), selectinload(Invoice.oegk_document))
     )
     _assert_owned(invoice, current_user.id)
     return invoice
@@ -159,7 +165,7 @@ async def correct_invoice(
     invoice = await db.scalar(
         select(Invoice)
         .where(Invoice.id == invoice_id)
-        .options(selectinload(Invoice.merkur_document))
+        .options(selectinload(Invoice.merkur_document), selectinload(Invoice.oegk_document))
     )
     _assert_owned(invoice, current_user.id)
 

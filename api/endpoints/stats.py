@@ -3,15 +3,21 @@ Dashboard summary and statistics aggregation endpoints.
 
 All monetary figures are in EUR.
 
-Reimbursement: an invoice counts as reimbursed once it is MERKUR_REIMBURSED (or
-COMPLETED). The amount is the real figure from the matched MerkurDocument when
-there is one ("confirmed"); otherwise it falls back to an 82% estimate
-(_REIMBURSEMENT_RATE) and is reported separately as "estimated" so the UI can
-label it. Invoices are bucketed by their own date (created_at as fallback), in
-Vienna local time.
+Reimbursement has two sources that add up (Merkur's statement deducts what the
+Sozialversicherung paid):
+- ÖGK: the real refund of the matched OegkDocument, counted as soon as the PDF is
+  linked, even while the invoice still waits for Merkur. Never estimated.
+- Merkur: counted once the invoice is MERKUR_REIMBURSED (or COMPLETED), from the
+  matched MerkurDocument ("confirmed"). Without one it falls back to an estimate
+  (_REIMBURSEMENT_RATE of the invoice minus the ÖGK part), reported separately as
+  "estimated" so the UI can label it.
+
+"Claimed" is an invoice that was submitted to ÖGK or Merkur; "claimed open" is the
+part of it not yet decided. Invoices are bucketed by their own date (created_at as
+fallback), in Vienna local time.
 """
 from datetime import date, datetime, timezone, timedelta
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query
@@ -22,6 +28,7 @@ from sqlalchemy.orm import selectinload
 from api.dependencies import get_current_user
 from core.database import get_db
 from models.domain import BenefitKind, BenefitRule, BenefitUsage, FamilyMember, InsuredPerson, Invoice, InvoiceStatus, ResetPeriod, Tariff, User
+from schemas.payload import _derive_pipeline
 
 router = APIRouter(tags=["stats"])
 
@@ -32,6 +39,11 @@ _REIMBURSED_STATUSES = {InvoiceStatus.MERKUR_REIMBURSED, InvoiceStatus.COMPLETED
 # Nothing more will happen to these without a human.
 _SETTLED_STATUSES = _REIMBURSED_STATUSES | {InvoiceStatus.MERKUR_REJECTED}
 _NEEDS_ATTENTION_STATUSES = {InvoiceStatus.FAILED, InvoiceStatus.NEEDS_REVIEW}
+# Submitted to ÖGK or Merkur (an invoice with a linked ÖGK refund counts too).
+_CLAIMED_STATUSES = {
+    InvoiceStatus.OEGK_SUBMITTING, InvoiceStatus.OEGK_SUBMITTED, InvoiceStatus.OEGK_REFUNDED,
+    InvoiceStatus.MERKUR_SUBMITTING, InvoiceStatus.MERKUR_SUBMITTED,
+} | _SETTLED_STATUSES
 
 
 def _current_year() -> int:
@@ -43,58 +55,93 @@ def _invoice_when(invoice: Invoice) -> datetime:
     return (invoice.date or invoice.created_at).astimezone(_VIENNA)
 
 
-def _reimbursement(invoice: Invoice) -> tuple[float, bool]:
-    """(amount, is_estimate). Zero while not (yet) reimbursed."""
+def _oegk_refund(invoice: Invoice) -> float:
+    """What ÖGK paid for this invoice (confirmed by its refund PDF), else 0."""
+    doc = invoice.oegk_document
+    return float(doc.reimbursed_amount) if doc is not None and doc.reimbursed_amount is not None else 0.0
+
+
+def _merkur_refund(invoice: Invoice, oegk: float) -> tuple[float, bool]:
+    """(amount, is_estimate). Zero while Merkur has not decided."""
     if invoice.status not in _REIMBURSED_STATUSES:
         return 0.0, False
     doc = invoice.merkur_document
     if doc is not None and doc.reimbursed_amount is not None:
         return float(doc.reimbursed_amount), False
-    return float(invoice.amount or 0) * _REIMBURSEMENT_RATE, True
+    return max(float(invoice.amount or 0) * _REIMBURSEMENT_RATE - oegk, 0.0), True
+
+
+def _is_claimed(invoice: Invoice) -> bool:
+    return invoice.status in _CLAIMED_STATUSES or invoice.oegk_document is not None
 
 
 def _totals(invoices: list[Invoice]) -> dict[str, float | int]:
     """Money roll-up shared by every endpoint."""
-    paid = confirmed = estimated = settled_paid = pending = 0.0
+    paid = oegk_total = merkur_confirmed = merkur_estimated = 0.0
+    settled_paid = settled_refunded = pending = 0.0
+    claimed = claimed_open = not_claimed = 0.0
     in_progress = attention = 0
     for inv in invoices:
         amt = float(inv.amount or 0)
         paid += amt
-        amount, is_estimate = _reimbursement(inv)
+        oegk = _oegk_refund(inv)
+        merkur, is_estimate = _merkur_refund(inv, oegk)
+        oegk_total += oegk
         if is_estimate:
-            estimated += amount
+            merkur_estimated += merkur
         else:
-            confirmed += amount
-        if inv.status in _SETTLED_STATUSES:
+            merkur_confirmed += merkur
+
+        settled = inv.status in _SETTLED_STATUSES
+        if settled:
             settled_paid += amt
+            settled_refunded += oegk + merkur
         elif inv.status != InvoiceStatus.FAILED:
             pending += amt
             in_progress += 1
+
+        if _is_claimed(inv):
+            claimed += amt
+            if not settled:
+                claimed_open += amt
+        elif not settled and inv.status != InvoiceStatus.FAILED:
+            not_claimed += amt
+
         if inv.status in _NEEDS_ATTENTION_STATUSES:
             attention += 1
-    reimbursed = confirmed + estimated
     return {
         "total_paid": round(paid, 2),
-        "total_reimbursed": round(reimbursed, 2),
-        "reimbursed_confirmed": round(confirmed, 2),
-        "reimbursed_estimated": round(estimated, 2),
+        "total_reimbursed": round(oegk_total + merkur_confirmed + merkur_estimated, 2),
+        "reimbursed_confirmed": round(oegk_total + merkur_confirmed, 2),
+        "reimbursed_estimated": round(merkur_estimated, 2),
+        "oegk_refunded": round(oegk_total, 2),
+        "merkur_refunded": round(merkur_confirmed, 2),
         # Out-of-pocket only for invoices that are decided; the rest is still pending.
-        "eigenanteil": round(settled_paid - reimbursed, 2),
+        "eigenanteil": round(settled_paid - settled_refunded, 2),
         "pending_amount": round(pending, 2),
+        # Invoice totals: submitted to ÖGK/Merkur, of which still undecided, and not yet submitted.
+        "claimed_amount": round(claimed, 2),
+        "claimed_open_amount": round(claimed_open, 2),
+        "not_yet_claimed_amount": round(not_claimed, 2),
         "in_progress_count": in_progress,
         "needs_attention_count": attention,
     }
 
 
-async def _load_invoices(db: AsyncSession, user_id, year: int | None, member_id=None) -> list[Invoice]:
+async def _load_invoices(
+    db: AsyncSession, user_id, year: int | None, member_id=None,
+    pipeline: Literal["standard", "pharmacy"] | None = None,
+) -> list[Invoice]:
     stmt = (
         select(Invoice)
         .where(Invoice.user_id == user_id)
-        .options(selectinload(Invoice.merkur_document))
+        .options(selectinload(Invoice.merkur_document), selectinload(Invoice.oegk_document))
     )
     if member_id:
         stmt = stmt.where(Invoice.family_member_id == member_id)
     invoices = (await db.execute(stmt)).scalars().all()
+    if pipeline:
+        invoices = [i for i in invoices if _derive_pipeline(i.category) == pipeline]
     if year is None:
         return list(invoices)
     return [i for i in invoices if _invoice_when(i).year == year]
@@ -118,11 +165,14 @@ async def _resolve_member_id(db: AsyncSession, user_id, member_key: str | None):
 async def dashboard_summary(
     year: int = Query(default_factory=_current_year),
     member_key: str | None = Query(default=None),
+    pipeline: Literal["standard", "pharmacy"] | None = Query(
+        default=None, description="standard = doctors and other ÖGK-first invoices, pharmacy = Merkur only"
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     member_id = await _resolve_member_id(db, current_user.id, member_key)
-    invoices = await _load_invoices(db, current_user.id, year, member_id)
+    invoices = await _load_invoices(db, current_user.id, year, member_id, pipeline)
     totals = _totals(invoices)
 
     # Benefit alerts: find rules where usage >= 75% of limit (nearly used up)
