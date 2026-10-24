@@ -16,10 +16,14 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
-      - name: Install dev dependencies
-        run: pip install -r requirements-dev.txt
+      # tests/conftest.py imports the whole app, so the app requirements are needed
+      # even for the parser tests that touch no database.
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Run parser unit tests
         run: pytest tests/test_regex_parser.py tests/test_rksv_parser.py tests/test_oegk_result_parser.py -v
