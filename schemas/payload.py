@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Optional, Literal, List
 
-from pydantic import BaseModel, EmailStr, ConfigDict
+from pydantic import BaseModel, EmailStr, ConfigDict, Field, model_validator
 
 from models.domain import InvoiceStatus, LimitType, MerkurResultState, BenefitKind, ResetPeriod
 
@@ -35,11 +35,20 @@ class UserRead(_Base):
 # FamilyMember
 # ---------------------------------------------------------------------------
 
+_SVNR = r"^\d{10}$"
+
+
 class FamilyMemberCreate(BaseModel):
     member_key: str
     name: str
     color: str
     initials: str
+    svnr: Optional[str] = Field(default=None, pattern=_SVNR)
+
+
+class FamilyMemberUpdate(BaseModel):
+    """svnr is write-only PII: Read only reports whether one is stored."""
+    svnr: Optional[str] = Field(default=None, pattern=_SVNR)
 
 
 class FamilyMemberRead(_Base):
@@ -49,7 +58,19 @@ class FamilyMemberRead(_Base):
     name: str
     color: str
     initials: str
+    has_svnr: bool = False
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# ÖGK refund PDFs
+# ---------------------------------------------------------------------------
+
+class OegkIngestRead(BaseModel):
+    outcome: Literal["not_a_refund", "duplicate", "linked", "unmatched", "ambiguous"]
+    document_id: Optional[uuid.UUID] = None
+    invoice_id: Optional[uuid.UUID] = None
+    is_new: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -143,19 +164,16 @@ class ContractCoverageRead(BaseModel):
 # Invoice
 # ---------------------------------------------------------------------------
 
-class InvoiceCreate(BaseModel):
-    file_path: str
-    provider_name: Optional[str] = None
-    patient_name: Optional[str] = None
-    amount: Optional[float] = None
-    date: Optional[datetime] = None
-    benefit_rule_id: Optional[uuid.UUID] = None
-    category: Optional[str] = None
-    family_member_id: Optional[uuid.UUID] = None
-
-
 class InvoiceStatusUpdate(BaseModel):
     status: InvoiceStatus
+
+
+class InvoiceCorrection(BaseModel):
+    """Manual fix-up of fields OCR could not extract (NEEDS_REVIEW recovery)."""
+    amount: Optional[float] = Field(default=None, gt=0)
+    date: Optional[datetime] = None
+    provider_name: Optional[str] = None
+    patient_name: Optional[str] = None
 
 
 # Pipeline variant: pharmacy skips ÖGK; standard goes through all 8 steps.
@@ -166,14 +184,28 @@ def _derive_pipeline(category: Optional[str]) -> Literal["standard", "pharmacy"]
         return "pharmacy"
     return "standard"
 
+def first_submission_status(category: Optional[str]) -> InvoiceStatus:
+    """Where a fully-parsed invoice goes next.
+
+    Only invoices with an explicitly chosen non-pharmacy category take the ÖGK
+    route. An unset category keeps the original behaviour (straight to Merkur),
+    so uploads that never picked a category are not silently rerouted.
+    """
+    if category and _derive_pipeline(category) == "standard":
+        return InvoiceStatus.READY_FOR_OEGK
+    return InvoiceStatus.READY_FOR_MERKUR
+
+
 # Ordered list of statuses — index = current_step
 _STATUS_ORDER = [
     InvoiceStatus.RECEIVED,
     InvoiceStatus.OCR_PROCESSING,
     InvoiceStatus.READY_FOR_OEGK,
+    InvoiceStatus.OEGK_SUBMITTING,
     InvoiceStatus.OEGK_SUBMITTED,
     InvoiceStatus.OEGK_REFUNDED,
     InvoiceStatus.READY_FOR_MERKUR,
+    InvoiceStatus.MERKUR_SUBMITTING,
     InvoiceStatus.MERKUR_SUBMITTED,
     InvoiceStatus.MERKUR_REIMBURSED,
     InvoiceStatus.MERKUR_REJECTED,
@@ -205,21 +237,37 @@ class InvoiceRead(_Base):
     current_step: int = 0
     reimbursed_amount: Optional[float] = None
     result_state: Optional[str] = None
+    oegk_reimbursed_amount: Optional[float] = None  # from the linked ÖGK refund PDF
 
+    @model_validator(mode="before")
     @classmethod
-    def model_validate(cls, obj, **kwargs):
-        instance = super().model_validate(obj, **kwargs)
-        instance.pipeline = _derive_pipeline(instance.category)
-        instance.current_step = _current_step(instance.status)
-        # Populate reimbursement info from the linked MerkurDocument (if eagerly loaded)
+    def _fill_derived(cls, data):
+        """Fill the derived fields from the ORM object.
+
+        A before-validator, not a model_validate override: FastAPI validates
+        responses through a TypeAdapter, which never calls the override.
+        """
+        if isinstance(data, dict):
+            return data
+        values = {name: getattr(data, name) for name in cls.model_fields if hasattr(data, name)}
+        values["pipeline"] = _derive_pipeline(values.get("category"))
+        values["current_step"] = _current_step(values["status"])
+        # The linked documents are only there when the endpoint loaded them eagerly;
+        # touching an unloaded relationship in async code raises, so ask defensively.
         try:
-            doc = getattr(obj, "merkur_document", None)
+            doc = getattr(data, "merkur_document", None)
             if doc is not None:
-                instance.reimbursed_amount = doc.reimbursed_amount
-                instance.result_state = doc.result_state.value if doc.result_state else None
+                values["reimbursed_amount"] = doc.reimbursed_amount
+                values["result_state"] = doc.result_state.value if doc.result_state else None
         except Exception:
             pass
-        return instance
+        try:
+            oegk_doc = getattr(data, "oegk_document", None)
+            if oegk_doc is not None:
+                values["oegk_reimbursed_amount"] = oegk_doc.reimbursed_amount
+        except Exception:
+            pass
+        return values
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { User, Mail, Globe, Shield, LogOut, ChevronRight, Plus } from "lucide-react";
+import { clearToken } from "../api";
 import { useAppContext } from "../state/AppContext";
 import { KCCard } from "../components/KCCard";
 
@@ -91,7 +92,7 @@ export function Settings() {
 
       <Section title="Sonstiges">
         <button
-          onClick={() => { setLoggedIn(false); navigate("/login"); }}
+          onClick={() => { clearToken(); setLoggedIn(false); navigate("/login"); }}
           className="flex items-center gap-3 px-4 py-3.5 w-full text-left"
         >
           <div className="w-8 h-8 rounded-lg bg-kc-dangerBg flex items-center justify-center flex-shrink-0">

@@ -2,13 +2,17 @@ export const STATUS_CONFIG: Record<string, { label: string; color: string; bg: s
   RECEIVED:           { label: "Empfangen",              color: "#6B7280", bg: "#F3F4F6" },
   OCR_PROCESSING:     { label: "OCR-Verarbeitung",       color: "#A16207", bg: "#FEF9C3" },
   READY_FOR_OEGK:     { label: "Bereit für ÖGK",        color: "#2563EB", bg: "#DBEAFE" },
+  OEGK_SUBMITTING:    { label: "Wird bei ÖGK eingereicht", color: "#1D4ED8", bg: "#DBEAFE" },
   OEGK_SUBMITTED:     { label: "Bei ÖGK eingereicht",   color: "#1D4ED8", bg: "#DBEAFE" },
   OEGK_REFUNDED:      { label: "Von ÖGK erstattet",     color: "#4338CA", bg: "#E0E7FF" },
   READY_FOR_MERKUR:   { label: "Bereit für Merkur",     color: "#C2410C", bg: "#FFEDD5" },
+  MERKUR_SUBMITTING:  { label: "Wird bei Merkur eingereicht", color: "#6D28D9", bg: "#EDE9FE" },
   MERKUR_SUBMITTED:   { label: "Bei Merkur eingereicht",color: "#6D28D9", bg: "#EDE9FE" },
   MERKUR_REIMBURSED:  { label: "Erstattet",             color: "#15803D", bg: "#DCFCE7" },
   MERKUR_REJECTED:    { label: "Abgelehnt",             color: "#B91C1C", bg: "#FEE2E2" },
   COMPLETED:          { label: "Abgeschlossen",          color: "#15803D", bg: "#DCFCE7" },
+  NEEDS_REVIEW:       { label: "Prüfung erforderlich",  color: "#B45309", bg: "#FEF3C7" },
+  FAILED:             { label: "Fehlgeschlagen",        color: "#B91C1C", bg: "#FEE2E2" },
 };
 
 export const MEMBER_COLORS: Record<string, string> = {

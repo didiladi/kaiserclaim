@@ -10,6 +10,7 @@ resources:
   #     -n kaiserclaim --dry-run=client -o yaml | kubectl apply -f -
   - pvc.yaml
   - redis.yaml
+  - backup.yaml
   - migrate-job.yaml
   - api-deployment.yaml
   - worker-deployment.yaml

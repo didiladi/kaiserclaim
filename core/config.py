@@ -34,6 +34,42 @@ class Settings(BaseSettings):
     # Set to True to skip real Merkur portal submission (for local testing)
     merkur_dry_run: bool = False
 
+    # ÖGK needs an interactive ID-Austria 2FA login, so the bot runs headed by
+    # default (needs a display: run the worker on the desktop or behind Xvfb/VNC).
+    # Set True only once the persistent session is known to be valid.
+    oegk_headless: bool = False
+
+    # ÖGK submission is OFF until the meine ÖGK submit flow is calibrated (see the
+    # "meine ÖGK calibration status" gap in CLAUDE.md). The refund lookup/download
+    # is independent of this flag.
+    oegk_submit_enabled: bool = False
+
+    # Base URL of the API (e.g. https://kaiserclaim.home). The desktop ÖGK worker
+    # uses it to fetch invoice files that live on the cluster's volume.
+    api_base_url: str = ""
+
+    # Home Assistant notify service used for failure and reminder pushes (Signal).
+    # All three must be set for notifications to be sent; otherwise they are dropped.
+    ha_url: str = ""
+    ha_token: str = ""
+    ha_notify_service: str = ""  # e.g. the name after "notify." in HA
+
+    # Static bearer token every /api/v1 request (except the webhook, which has
+    # its own secret) must send as `Authorization: Bearer <token>`. Empty (the
+    # default) rejects all requests: auth fails closed, it must be set explicitly.
+    api_token: str = ""
+
+    # Browser origins allowed to call the API (no wildcard).
+    cors_origins: list[str] = [
+        "https://kaiserclaim.home",
+        "https://kaiserclaim.didiladi.com",
+        "http://localhost:5173",
+    ]
+
+    # Shared secret required in the X-Webhook-Secret header on /webhooks/*.
+    # Empty (the default) rejects all requests — must be set explicitly.
+    webhook_secret: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

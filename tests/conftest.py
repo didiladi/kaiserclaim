@@ -18,6 +18,7 @@ os.environ.setdefault("CELERY_BROKER_URL", "redis://localhost:6379/0")
 os.environ.setdefault("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
 os.environ.setdefault("STORAGE_ROOT", "/tmp/kaiserclaim-test-storage")
 os.environ.setdefault("SECRET_KEY", "test-secret")
+os.environ.setdefault("API_TOKEN", "test-api-token")
 os.environ.setdefault("MERKUR_USERNAME", "")
 os.environ.setdefault("MERKUR_PASSWORD", "")
 
@@ -56,6 +57,7 @@ async def client():
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
+        headers={"Authorization": f"Bearer {os.environ['API_TOKEN']}"},
     ) as c:
         yield c
 

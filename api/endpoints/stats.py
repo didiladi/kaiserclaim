@@ -1,24 +1,150 @@
 """
 Dashboard summary and statistics aggregation endpoints.
 
-All monetary figures are in EUR. The reimbursement rate of 82% is applied to
-COMPLETED invoices to compute total_reimbursed and eigenanteil, matching the
-design spec's financial model.
+All monetary figures are in EUR.
+
+Reimbursement has two sources that add up (Merkur's statement deducts what the
+Sozialversicherung paid):
+- ÖGK: the real refund of the matched OegkDocument, counted as soon as the PDF is
+  linked, even while the invoice still waits for Merkur. Never estimated.
+- Merkur: counted once the invoice is MERKUR_REIMBURSED (or COMPLETED), from the
+  matched MerkurDocument ("confirmed"). Without one it falls back to an estimate
+  (_REIMBURSEMENT_RATE of the invoice minus the ÖGK part), reported separately as
+  "estimated" so the UI can label it.
+
+"Claimed" is an invoice that was submitted to ÖGK or Merkur; "claimed open" is the
+part of it not yet decided. Invoices are bucketed by their own date (created_at as
+fallback), in Vienna local time.
 """
 from datetime import date, datetime, timezone, timedelta
-from typing import Any
+from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import extract, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from api.dependencies import get_current_user
 from core.database import get_db
 from models.domain import BenefitKind, BenefitRule, BenefitUsage, FamilyMember, InsuredPerson, Invoice, InvoiceStatus, ResetPeriod, Tariff, User
+from schemas.payload import _derive_pipeline
 
 router = APIRouter(tags=["stats"])
 
 _REIMBURSEMENT_RATE = 0.82
+_VIENNA = ZoneInfo("Europe/Vienna")
+
+_REIMBURSED_STATUSES = {InvoiceStatus.MERKUR_REIMBURSED, InvoiceStatus.COMPLETED}
+# Nothing more will happen to these without a human.
+_SETTLED_STATUSES = _REIMBURSED_STATUSES | {InvoiceStatus.MERKUR_REJECTED}
+_NEEDS_ATTENTION_STATUSES = {InvoiceStatus.FAILED, InvoiceStatus.NEEDS_REVIEW}
+# Submitted to ÖGK or Merkur (an invoice with a linked ÖGK refund counts too).
+_CLAIMED_STATUSES = {
+    InvoiceStatus.OEGK_SUBMITTING, InvoiceStatus.OEGK_SUBMITTED, InvoiceStatus.OEGK_REFUNDED,
+    InvoiceStatus.MERKUR_SUBMITTING, InvoiceStatus.MERKUR_SUBMITTED,
+} | _SETTLED_STATUSES
+
+
+def _current_year() -> int:
+    return datetime.now(_VIENNA).year
+
+
+def _invoice_when(invoice: Invoice) -> datetime:
+    """The invoice's own date, falling back to when it was uploaded (Vienna time)."""
+    return (invoice.date or invoice.created_at).astimezone(_VIENNA)
+
+
+def _oegk_refund(invoice: Invoice) -> float:
+    """What ÖGK paid for this invoice (confirmed by its refund PDF), else 0."""
+    doc = invoice.oegk_document
+    return float(doc.reimbursed_amount) if doc is not None and doc.reimbursed_amount is not None else 0.0
+
+
+def _merkur_refund(invoice: Invoice, oegk: float) -> tuple[float, bool]:
+    """(amount, is_estimate). Zero while Merkur has not decided."""
+    if invoice.status not in _REIMBURSED_STATUSES:
+        return 0.0, False
+    doc = invoice.merkur_document
+    if doc is not None and doc.reimbursed_amount is not None:
+        return float(doc.reimbursed_amount), False
+    return max(float(invoice.amount or 0) * _REIMBURSEMENT_RATE - oegk, 0.0), True
+
+
+def _is_claimed(invoice: Invoice) -> bool:
+    return invoice.status in _CLAIMED_STATUSES or invoice.oegk_document is not None
+
+
+def _totals(invoices: list[Invoice]) -> dict[str, float | int]:
+    """Money roll-up shared by every endpoint."""
+    paid = oegk_total = merkur_confirmed = merkur_estimated = 0.0
+    settled_paid = settled_refunded = pending = 0.0
+    claimed = claimed_open = not_claimed = 0.0
+    in_progress = attention = 0
+    for inv in invoices:
+        amt = float(inv.amount or 0)
+        paid += amt
+        oegk = _oegk_refund(inv)
+        merkur, is_estimate = _merkur_refund(inv, oegk)
+        oegk_total += oegk
+        if is_estimate:
+            merkur_estimated += merkur
+        else:
+            merkur_confirmed += merkur
+
+        settled = inv.status in _SETTLED_STATUSES
+        if settled:
+            settled_paid += amt
+            settled_refunded += oegk + merkur
+        elif inv.status != InvoiceStatus.FAILED:
+            pending += amt
+            in_progress += 1
+
+        if _is_claimed(inv):
+            claimed += amt
+            if not settled:
+                claimed_open += amt
+        elif not settled and inv.status != InvoiceStatus.FAILED:
+            not_claimed += amt
+
+        if inv.status in _NEEDS_ATTENTION_STATUSES:
+            attention += 1
+    return {
+        "total_paid": round(paid, 2),
+        "total_reimbursed": round(oegk_total + merkur_confirmed + merkur_estimated, 2),
+        "reimbursed_confirmed": round(oegk_total + merkur_confirmed, 2),
+        "reimbursed_estimated": round(merkur_estimated, 2),
+        "oegk_refunded": round(oegk_total, 2),
+        "merkur_refunded": round(merkur_confirmed, 2),
+        # Out-of-pocket only for invoices that are decided; the rest is still pending.
+        "eigenanteil": round(settled_paid - settled_refunded, 2),
+        "pending_amount": round(pending, 2),
+        # Invoice totals: submitted to ÖGK/Merkur, of which still undecided, and not yet submitted.
+        "claimed_amount": round(claimed, 2),
+        "claimed_open_amount": round(claimed_open, 2),
+        "not_yet_claimed_amount": round(not_claimed, 2),
+        "in_progress_count": in_progress,
+        "needs_attention_count": attention,
+    }
+
+
+async def _load_invoices(
+    db: AsyncSession, user_id, year: int | None, member_id=None,
+    pipeline: Literal["standard", "pharmacy"] | None = None,
+) -> list[Invoice]:
+    stmt = (
+        select(Invoice)
+        .where(Invoice.user_id == user_id)
+        .options(selectinload(Invoice.merkur_document), selectinload(Invoice.oegk_document))
+    )
+    if member_id:
+        stmt = stmt.where(Invoice.family_member_id == member_id)
+    invoices = (await db.execute(stmt)).scalars().all()
+    if pipeline:
+        invoices = [i for i in invoices if _derive_pipeline(i.category) == pipeline]
+    if year is None:
+        return list(invoices)
+    return [i for i in invoices if _invoice_when(i).year == year]
 
 _MONTH_NAMES = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
 
@@ -37,28 +163,17 @@ async def _resolve_member_id(db: AsyncSession, user_id, member_key: str | None):
 
 @router.get("/dashboard/summary")
 async def dashboard_summary(
-    year: int = Query(default=2026),
+    year: int = Query(default_factory=_current_year),
     member_key: str | None = Query(default=None),
+    pipeline: Literal["standard", "pharmacy"] | None = Query(
+        default=None, description="standard = doctors and other ÖGK-first invoices, pharmacy = Merkur only"
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     member_id = await _resolve_member_id(db, current_user.id, member_key)
-
-    stmt = select(Invoice).where(
-        Invoice.user_id == current_user.id,
-        extract("year", Invoice.created_at) == year,
-    )
-    if member_id:
-        stmt = stmt.where(Invoice.family_member_id == member_id)
-
-    result = await db.execute(stmt)
-    invoices = result.scalars().all()
-
-    total_paid = sum(i.amount or 0 for i in invoices)
-    completed = [i for i in invoices if i.status == InvoiceStatus.COMPLETED]
-    total_reimbursed = sum(i.amount or 0 for i in completed) * _REIMBURSEMENT_RATE
-    in_progress_count = sum(1 for i in invoices if i.status != InvoiceStatus.COMPLETED)
-    eigenanteil = total_paid - total_reimbursed
+    invoices = await _load_invoices(db, current_user.id, year, member_id, pipeline)
+    totals = _totals(invoices)
 
     # Benefit alerts: find rules where usage >= 75% of limit (nearly used up)
     benefit_alerts = []
@@ -90,10 +205,7 @@ async def dashboard_summary(
 
     return {
         "year": year,
-        "total_paid": round(total_paid, 2),
-        "total_reimbursed": round(total_reimbursed, 2),
-        "in_progress_count": in_progress_count,
-        "eigenanteil": round(eigenanteil, 2),
+        **totals,
         "benefit_alerts": benefit_alerts,
         "unused_alerts": unused_alerts,
     }
@@ -182,22 +294,13 @@ async def _compute_unused_alerts(db, user_id, all_rules: list) -> list[dict]:
 
 @router.get("/stats/monthly")
 async def stats_monthly(
-    year: int = Query(default=2026),
+    year: int = Query(default_factory=_current_year),
     member_key: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
     member_id = await _resolve_member_id(db, current_user.id, member_key)
-
-    stmt = select(Invoice).where(
-        Invoice.user_id == current_user.id,
-        extract("year", Invoice.created_at) == year,
-    )
-    if member_id:
-        stmt = stmt.where(Invoice.family_member_id == member_id)
-
-    result = await db.execute(stmt)
-    invoices = result.scalars().all()
+    invoices = await _load_invoices(db, current_user.id, year, member_id)
 
     # Fetch all family members for by_member breakdown
     members_result = await db.execute(
@@ -207,7 +310,7 @@ async def stats_monthly(
 
     months: dict[int, dict] = {}
     for invoice in invoices:
-        month_num = invoice.created_at.month
+        month_num = _invoice_when(invoice).month
         if month_num not in months:
             months[month_num] = {"month": _MONTH_NAMES[month_num - 1], "total": 0.0, "by_member": {}}
         amt = invoice.amount or 0
@@ -231,35 +334,18 @@ async def stats_yearly(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
-    result = await db.execute(
-        select(Invoice).where(Invoice.user_id == current_user.id)
-    )
-    invoices = result.scalars().all()
+    invoices = await _load_invoices(db, current_user.id, None)
 
-    by_year: dict[int, dict] = {}
+    by_year: dict[int, list[Invoice]] = {}
     for invoice in invoices:
-        year = invoice.created_at.year
-        if year not in by_year:
-            by_year[year] = {"year": year, "total": 0.0, "completed": 0.0}
-        amt = invoice.amount or 0
-        by_year[year]["total"] += amt
-        if invoice.status == InvoiceStatus.COMPLETED:
-            by_year[year]["completed"] += amt
+        by_year.setdefault(_invoice_when(invoice).year, []).append(invoice)
 
-    return [
-        {
-            "year": year,
-            "total_paid": round(data["total"], 2),
-            "total_reimbursed": round(data["completed"] * _REIMBURSEMENT_RATE, 2),
-            "eigenanteil": round(data["total"] - data["completed"] * _REIMBURSEMENT_RATE, 2),
-        }
-        for year, data in sorted(by_year.items())
-    ]
+    return [{"year": year, **_totals(items)} for year, items in sorted(by_year.items())]
 
 
 @router.get("/stats/members")
 async def stats_members(
-    year: int = Query(default=2026),
+    year: int = Query(default_factory=_current_year),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
@@ -268,23 +354,15 @@ async def stats_members(
     )
     members = members_result.scalars().all()
 
-    invoices_result = await db.execute(
-        select(Invoice).where(
-            Invoice.user_id == current_user.id,
-            extract("year", Invoice.created_at) == year,
-        )
-    )
-    all_invoices = invoices_result.scalars().all()
+    all_invoices = await _load_invoices(db, current_user.id, year)
 
     family_total = sum(i.amount or 0 for i in all_invoices)
 
     output = []
     for member in members:
         member_invoices = [i for i in all_invoices if i.family_member_id == member.id]
-        total_paid = sum(i.amount or 0 for i in member_invoices)
-        completed_amt = sum(i.amount or 0 for i in member_invoices if i.status == InvoiceStatus.COMPLETED)
-        total_reimbursed = completed_amt * _REIMBURSEMENT_RATE
-        eigenanteil = total_paid - total_reimbursed
+        totals = _totals(member_invoices)
+        total_paid = totals["total_paid"]
 
         # Category breakdown
         categories: dict[str, float] = {}
@@ -298,9 +376,7 @@ async def stats_members(
             "color": member.color,
             "initials": member.initials,
             "invoice_count": len(member_invoices),
-            "total_paid": round(total_paid, 2),
-            "total_reimbursed": round(total_reimbursed, 2),
-            "eigenanteil": round(eigenanteil, 2),
+            **totals,
             "share_pct": round(total_paid / family_total * 100, 1) if family_total else 0,
             "categories": [
                 {"name": k, "amount": round(v, 2)}

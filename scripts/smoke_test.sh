@@ -2,6 +2,7 @@
 # Smoke test for the pharmacy short-track pipeline.
 # Usage: ./scripts/smoke_test.sh /path/to/receipt.(pdf|jpg|png)
 set -euo pipefail
+: "${API_TOKEN:?set API_TOKEN to the API bearer token}"
 
 FILE="${1:-}"
 if [[ -z "$FILE" ]]; then
@@ -24,7 +25,7 @@ docker compose exec postgres psql -U kaiserclaim -c \
   2>&1 | grep -v "^WARN"
 
 echo "==> Uploading file via HTTP..."
-RESPONSE=$(curl -sf -X POST "$API/api/v1/invoices/upload?user_id=$USER_ID" \
+RESPONSE=$(curl -sf -H "Authorization: Bearer $API_TOKEN" -X POST "$API/api/v1/invoices/upload?user_id=$USER_ID" \
   -F "file=@$FILE")
 echo "$RESPONSE" | jq .
 
@@ -43,7 +44,7 @@ DEADLINE=$((SECONDS + 180))
 PREV_STATUS=""
 
 while [[ $SECONDS -lt $DEADLINE ]]; do
-  STATUS=$(curl -sf "$API/api/v1/invoices/$INVOICE_ID?user_id=$USER_ID" | jq -r '.status')
+  STATUS=$(curl -sf -H "Authorization: Bearer $API_TOKEN" "$API/api/v1/invoices/$INVOICE_ID?user_id=$USER_ID" | jq -r '.status')
 
   if [[ "$STATUS" != "$PREV_STATUS" ]]; then
     echo "    $(date +%H:%M:%S)  $STATUS"
@@ -55,7 +56,7 @@ while [[ $SECONDS -lt $DEADLINE ]]; do
     echo "==> OCR pipeline complete. Invoice is READY_FOR_MERKUR."
     echo ""
     echo "==> Extracted metadata:"
-    curl -sf "$API/api/v1/invoices/$INVOICE_ID?user_id=$USER_ID" | jq '{amount, date, provider_name}'
+    curl -sf -H "Authorization: Bearer $API_TOKEN" "$API/api/v1/invoices/$INVOICE_ID?user_id=$USER_ID" | jq '{amount, date, provider_name}'
     exit 0
   fi
 

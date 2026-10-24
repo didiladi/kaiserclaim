@@ -1,10 +1,11 @@
 import shutil
 import uuid
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -13,8 +14,14 @@ from api.dependencies import get_current_user
 from core.config import get_settings
 from core.database import get_db
 from models.domain import FamilyMember, Invoice, InvoiceStatus, User
-from schemas.payload import InvoiceCreate, InvoiceRead, InvoiceStatusUpdate
-from workers.tasks import run_ocr, submit_to_merkur
+from schemas.payload import InvoiceCorrection, InvoiceRead, InvoiceStatusUpdate, _derive_pipeline, first_submission_status
+from workers.tasks import run_ocr, submit_to_merkur, submit_to_oegk
+
+_CORRECTABLE_STATUSES = {
+    InvoiceStatus.NEEDS_REVIEW,
+    InvoiceStatus.READY_FOR_OEGK,
+    InvoiceStatus.READY_FOR_MERKUR,
+}
 
 _TERMINAL_STATUSES = {
     InvoiceStatus.COMPLETED,
@@ -72,28 +79,14 @@ async def upload_invoice(
     return invoice
 
 
-@router.post("/", response_model=InvoiceRead, status_code=status.HTTP_201_CREATED)
-async def create_invoice(
-    payload: InvoiceCreate,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    invoice = Invoice(user_id=current_user.id, **payload.model_dump())
-    db.add(invoice)
-    await db.commit()
-    await db.refresh(invoice)
-
-    # Kick off OCR immediately as a background Celery task
-    run_ocr.delay(str(invoice.id))
-
-    return invoice
-
-
 @router.get("/", response_model=list[InvoiceRead])
 async def list_invoices(
     member_key: str | None = Query(default=None, description="Filter by family member key"),
     status_group: str | None = Query(default=None, description="all | in_progress | completed"),
     search: str | None = Query(default=None, description="Case-insensitive search on provider_name"),
+    pipeline: Literal["standard", "pharmacy"] | None = Query(
+        default=None, description="standard = doctors and other ÖGK-first invoices, pharmacy = Merkur only"
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -116,11 +109,14 @@ async def list_invoices(
         stmt = stmt.where(Invoice.provider_name.ilike(f"%{search}%"))
 
     stmt = (
-        stmt.options(selectinload(Invoice.merkur_document))
+        stmt.options(selectinload(Invoice.merkur_document), selectinload(Invoice.oegk_document))
         .order_by(Invoice.created_at.desc())
     )
     result = await db.execute(stmt)
-    return result.scalars().all()
+    invoices = result.scalars().all()
+    if pipeline:
+        invoices = [i for i in invoices if _derive_pipeline(i.category) == pipeline]
+    return invoices
 
 
 @router.get("/{invoice_id}", response_model=InvoiceRead)
@@ -132,9 +128,65 @@ async def get_invoice(
     invoice = await db.scalar(
         select(Invoice)
         .where(Invoice.id == invoice_id)
-        .options(selectinload(Invoice.merkur_document))
+        .options(selectinload(Invoice.merkur_document), selectinload(Invoice.oegk_document))
     )
     _assert_owned(invoice, current_user.id)
+    return invoice
+
+
+@router.get("/{invoice_id}/file")
+async def download_invoice_file(
+    invoice_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Serve the stored upload (used by the desktop ÖGK worker)."""
+    invoice = await db.get(Invoice, invoice_id)
+    _assert_owned(invoice, current_user.id)
+
+    path = Path(invoice.file_path).resolve()
+    root = Path(settings.storage_root).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    return FileResponse(path)
+
+
+@router.patch("/{invoice_id}", response_model=InvoiceRead)
+async def correct_invoice(
+    invoice_id: UUID,
+    payload: InvoiceCorrection,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Fill in fields OCR missed. Once amount and date are both present, a
+    NEEDS_REVIEW invoice advances to READY_FOR_OEGK or READY_FOR_MERKUR
+    (depending on category). It is not submitted automatically; the user
+    triggers that via /submit-oegk or /submit-merkur."""
+    invoice = await db.scalar(
+        select(Invoice)
+        .where(Invoice.id == invoice_id)
+        .options(selectinload(Invoice.merkur_document), selectinload(Invoice.oegk_document))
+    )
+    _assert_owned(invoice, current_user.id)
+
+    if invoice.status not in _CORRECTABLE_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Invoice can only be corrected in NEEDS_REVIEW, READY_FOR_OEGK or READY_FOR_MERKUR, current: {invoice.status.value}",
+        )
+
+    for field, value in payload.model_dump(exclude_unset=True, exclude_none=True).items():
+        setattr(invoice, field, value)
+
+    if (
+        invoice.status == InvoiceStatus.NEEDS_REVIEW
+        and invoice.amount is not None
+        and invoice.date is not None
+    ):
+        invoice.status = first_submission_status(invoice.category)
+
+    await db.commit()
+    await db.refresh(invoice)
     return invoice
 
 
@@ -169,6 +221,34 @@ async def trigger_merkur_submission(
         )
 
     submit_to_merkur.delay(str(invoice_id))
+    return invoice
+
+
+@router.post("/{invoice_id}/submit-oegk", response_model=InvoiceRead)
+async def trigger_oegk_submission(
+    invoice_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Queue ÖGK submission. The bot needs an interactive ID-Austria 2FA login
+    when the persistent session has expired, so the worker must have a display."""
+    if not get_settings().oegk_submit_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="ÖGK submission is disabled: the meine ÖGK submit flow is not calibrated yet. "
+                   "Submit manually in meine ÖGK; refund PDFs are still matched automatically.",
+        )
+
+    invoice = await db.get(Invoice, invoice_id)
+    _assert_owned(invoice, current_user.id)
+
+    if invoice.status != InvoiceStatus.READY_FOR_OEGK:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Invoice must be in READY_FOR_OEGK state, current: {invoice.status.value}",
+        )
+
+    submit_to_oegk.delay(str(invoice_id))
     return invoice
 
 

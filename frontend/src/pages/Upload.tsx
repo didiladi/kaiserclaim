@@ -30,13 +30,15 @@ export function Upload() {
 
   const handleUpload = async () => {
     if (!file) { setError("Bitte zuerst eine Datei wählen."); return; }
+    // Without a category the invoice is treated as a pharmacy receipt and skips the ÖGK step.
+    if (!selectedCategory) { setError("Bitte die Leistung wählen: sie bestimmt den Erstattungsweg."); return; }
     setError("");
     setUploading(true);
     try {
       const member = familyMembers.find((m) => m.member_key === selectedMember);
       await uploadInvoice(file, {
         familyMemberId: member?.id,
-        category: selectedCategory || undefined,
+        category: selectedCategory,
       });
       setSuccess(true);
       setTimeout(() => navigate("/invoices"), 1500);
@@ -112,7 +114,7 @@ export function Upload() {
           value={selectedCategory}
           onChange={(e) => setSelectedCategory(e.target.value)}
         >
-          <option value="">— Optional —</option>
+          <option value="">— Bitte wählen —</option>
           {(benefits.length > 0 ? benefits.map((b) => b.benefit_name) : BENEFIT_CATEGORIES).map((cat) => (
             <option key={cat} value={cat}>{cat}</option>
           ))}

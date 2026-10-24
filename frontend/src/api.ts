@@ -2,6 +2,63 @@ export const USER_ID = "00000000-0000-0000-0000-000000000001";
 
 const BASE = "/api/v1";
 
+export const CURRENT_YEAR = new Date().getFullYear();
+
+// ---------------------------------------------------------------------------
+// Auth: static bearer token, kept in localStorage (a per-device convenience;
+// the page works, just logged out, if storage is unavailable).
+// ---------------------------------------------------------------------------
+
+const TOKEN_KEY = "kc_api_token";
+export const UNAUTHORIZED_EVENT = "kc-unauthorized";
+
+export function getToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setToken(token: string): void {
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    /* storage blocked: token only lives for this page load */
+    memoryToken = token;
+  }
+}
+
+export function clearToken(): void {
+  memoryToken = null;
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+let memoryToken: string | null = null;
+
+/** fetch() that adds the bearer token and signals the app on a 401. */
+async function authedFetch(url: string, init: RequestInit = {}, tokenOverride?: string): Promise<Response> {
+  const token = tokenOverride ?? getToken() ?? memoryToken;
+  const headers = new Headers(init.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(url, { ...init, headers });
+  if (res.status === 401 && tokenOverride === undefined) {
+    clearToken();
+    window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+  }
+  return res;
+}
+
+/** True if the token is accepted by the API (used by the login screen). */
+export async function verifyToken(token: string): Promise<boolean> {
+  const res = await authedFetch(`${BASE}/family/?user_id=${USER_ID}`, {}, token);
+  return res.ok;
+}
+
 export interface Invoice {
   id: string;
   user_id: string;
@@ -20,6 +77,7 @@ export interface Invoice {
   updated_at: string;
   reimbursed_amount: number | null;
   result_state: "REIMBURSED" | "REJECTED" | "UNKNOWN" | null;
+  oegk_reimbursed_amount: number | null; // from the linked ÖGK refund PDF
 }
 
 export interface MerkurDocument {
@@ -41,13 +99,17 @@ export type InvoiceStatus =
   | "RECEIVED"
   | "OCR_PROCESSING"
   | "READY_FOR_OEGK"
+  | "OEGK_SUBMITTING"
   | "OEGK_SUBMITTED"
   | "OEGK_REFUNDED"
   | "READY_FOR_MERKUR"
+  | "MERKUR_SUBMITTING"
   | "MERKUR_SUBMITTED"
   | "MERKUR_REIMBURSED"
   | "MERKUR_REJECTED"
-  | "COMPLETED";
+  | "COMPLETED"
+  | "NEEDS_REVIEW"
+  | "FAILED";
 
 export interface FamilyMember {
   id: string;
@@ -136,6 +198,15 @@ export interface DashboardSummary {
   total_reimbursed: number;
   in_progress_count: number;
   eigenanteil: number;
+  reimbursed_confirmed: number; // real amounts from ÖGK and Merkur
+  reimbursed_estimated: number; // estimate where Merkur's result is not linked yet
+  oegk_refunded: number;
+  merkur_refunded: number; // confirmed only
+  pending_amount: number;
+  claimed_amount: number; // invoice totals submitted to ÖGK or Merkur
+  claimed_open_amount: number; // ...of which not decided yet
+  not_yet_claimed_amount: number; // invoice totals not submitted anywhere yet
+  needs_attention_count: number;
   benefit_alerts: { benefit_name: string; percent_used: number; used: number; limit: number }[];
   unused_alerts: UnusedAlert[];
 }
@@ -151,6 +222,11 @@ export interface YearlyStats {
   total_paid: number;
   total_reimbursed: number;
   eigenanteil: number;
+  in_progress_count: number;
+  reimbursed_confirmed: number; // real amounts from Merkur
+  reimbursed_estimated: number; // 82% estimate where no Merkur result is linked yet
+  pending_amount: number;
+  needs_attention_count: number;
 }
 
 export interface MemberStats {
@@ -162,6 +238,11 @@ export interface MemberStats {
   total_paid: number;
   total_reimbursed: number;
   eigenanteil: number;
+  in_progress_count: number;
+  reimbursed_confirmed: number; // real amounts from Merkur
+  reimbursed_estimated: number; // 82% estimate where no Merkur result is linked yet
+  pending_amount: number;
+  needs_attention_count: number;
   share_pct: number;
   categories: { name: string; amount: number }[];
 }
@@ -172,7 +253,7 @@ export interface MemberStats {
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const sep = path.includes("?") ? "&" : "?";
-  const res = await fetch(`${BASE}${path}${sep}user_id=${USER_ID}`, init);
+  const res = await authedFetch(`${BASE}${path}${sep}user_id=${USER_ID}`, init);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json() as Promise<T>;
 }
@@ -181,9 +262,12 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 // Invoices
 // ---------------------------------------------------------------------------
 
-export function listInvoices(params?: { member_key?: string; status_group?: string; search?: string }): Promise<Invoice[]> {
+export type PipelineFilter = "standard" | "pharmacy";
+
+export function listInvoices(params?: { member_key?: string; status_group?: string; search?: string; pipeline?: PipelineFilter }): Promise<Invoice[]> {
   const qs = new URLSearchParams();
   if (params?.member_key) qs.set("member_key", params.member_key);
+  if (params?.pipeline) qs.set("pipeline", params.pipeline);
   if (params?.status_group) qs.set("status_group", params.status_group);
   if (params?.search) qs.set("search", params.search);
   const q = qs.toString();
@@ -203,7 +287,7 @@ export async function uploadInvoice(
   if (opts?.benefitRuleId) form.append("benefit_rule_id", opts.benefitRuleId);
   if (opts?.familyMemberId) form.append("family_member_id", opts.familyMemberId);
   if (opts?.category) form.append("category", opts.category);
-  const res = await fetch(`${BASE}/invoices/upload?user_id=${USER_ID}`, {
+  const res = await authedFetch(`${BASE}/invoices/upload?user_id=${USER_ID}`, {
     method: "POST",
     body: form,
   });
@@ -216,6 +300,27 @@ export async function uploadInvoice(
 
 export function submitToMerkur(id: string): Promise<Invoice> {
   return apiFetch<Invoice>(`/invoices/${id}/submit-merkur`, { method: "POST" });
+}
+
+// ÖGK submission by the bot is switched off (the endpoint answers 501): the user submits in
+// meine ÖGK and confirms it here, which is what lets the refund PDF be matched and counted.
+export function markOegkSubmitted(id: string): Promise<Invoice> {
+  return apiFetch<Invoice>(`/invoices/${id}/status`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "OEGK_SUBMITTED" }),
+  });
+}
+
+export function correctInvoice(
+  id: string,
+  data: { amount?: number; date?: string; provider_name?: string; patient_name?: string },
+): Promise<Invoice> {
+  return apiFetch<Invoice>(`/invoices/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +350,7 @@ export async function createContract(data: { provider_name: string; policy_numbe
 export async function parseContractPdf(contractId: string, file: File): Promise<ContractCoverage> {
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch(`${BASE}/contracts/${contractId}/parse-pdf?user_id=${USER_ID}`, {
+  const res = await authedFetch(`${BASE}/contracts/${contractId}/parse-pdf?user_id=${USER_ID}`, {
     method: "POST",
     body: form,
   });
@@ -273,12 +378,12 @@ export function createFamilyMember(data: { member_key: string; name: string; col
 // Dashboard & stats
 // ---------------------------------------------------------------------------
 
-export function getDashboardSummary(year = 2026, member_key?: string): Promise<DashboardSummary> {
-  const qs = `year=${year}${member_key ? `&member_key=${member_key}` : ""}`;
+export function getDashboardSummary(year = CURRENT_YEAR, member_key?: string, pipeline?: PipelineFilter): Promise<DashboardSummary> {
+  const qs = `year=${year}${member_key ? `&member_key=${member_key}` : ""}${pipeline ? `&pipeline=${pipeline}` : ""}`;
   return apiFetch<DashboardSummary>(`/dashboard/summary?${qs}`);
 }
 
-export function getMonthlyStats(year = 2026, member_key?: string): Promise<MonthlyStats[]> {
+export function getMonthlyStats(year = CURRENT_YEAR, member_key?: string): Promise<MonthlyStats[]> {
   const qs = `year=${year}${member_key ? `&member_key=${member_key}` : ""}`;
   return apiFetch<MonthlyStats[]>(`/stats/monthly?${qs}`);
 }
@@ -287,7 +392,7 @@ export function getYearlyStats(): Promise<YearlyStats[]> {
   return apiFetch<YearlyStats[]>("/stats/yearly");
 }
 
-export function getMemberStats(year = 2026): Promise<MemberStats[]> {
+export function getMemberStats(year = CURRENT_YEAR): Promise<MemberStats[]> {
   return apiFetch<MemberStats[]>(`/stats/members?year=${year}`);
 }
 

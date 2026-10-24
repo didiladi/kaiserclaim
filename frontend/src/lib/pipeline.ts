@@ -32,8 +32,16 @@ export function getPipelineSteps(variant: PipelineVariant): PipelineStep[] {
 
 export function getCurrentStepIndex(statusKey: string, variant: PipelineVariant): number {
   const steps = getPipelineSteps(variant);
-  // MERKUR_REJECTED maps to the same step as MERKUR_REIMBURSED ("Merkur Entscheidung")
-  const resolvedKey = statusKey === "MERKUR_REJECTED" ? "MERKUR_REIMBURSED" : statusKey;
+  // MERKUR_REJECTED maps to the same step as MERKUR_REIMBURSED ("Merkur Entscheidung");
+  // MERKUR_SUBMITTING / OEGK_SUBMITTING (mid-submission) map to their SUBMITTED step.
+  // NEEDS_REVIEW/FAILED have no reliable step (they can occur at OCR or at Merkur
+  // submit) — fall through to the default index-0, and rely on the status pill
+  // (not the stepper) to surface them.
+  const resolvedKey =
+    statusKey === "MERKUR_REJECTED" ? "MERKUR_REIMBURSED" :
+    statusKey === "MERKUR_SUBMITTING" ? "MERKUR_SUBMITTED" :
+    statusKey === "OEGK_SUBMITTING" ? "OEGK_SUBMITTED" :
+    statusKey;
   const idx = steps.findIndex((s) => s.statusKey === resolvedKey);
   return idx >= 0 ? idx : 0;
 }

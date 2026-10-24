@@ -4,6 +4,7 @@
 # Tests: submit-merkur (dry-run) → COMPLETED + BenefitUsage written + idempotency.
 # Requires: docker compose stack running with MERKUR_DRY_RUN=true.
 set -euo pipefail
+: "${API_TOKEN:?set API_TOKEN to the API bearer token}"
 
 API="http://localhost:8000"
 USER_ID="00000000-0000-0000-0000-000000000001"
@@ -25,7 +26,7 @@ poll_status() {
   local id="$1" target="$2" deadline=$((SECONDS + 60)) prev=""
   while [[ $SECONDS -lt $deadline ]]; do
     local s
-    s=$(curl -sf "$API/api/v1/invoices/$id?user_id=$USER_ID" | jq -r '.status' 2>/dev/null || echo "error")
+    s=$(curl -sf -H "Authorization: Bearer $API_TOKEN" "$API/api/v1/invoices/$id?user_id=$USER_ID" | jq -r '.status' 2>/dev/null || echo "error")
     if [[ "$s" != "$prev" ]]; then info "  status: $s"; prev="$s"; fi
     if [[ "$s" == "$target" ]]; then return 0; fi
     sleep 2
@@ -40,7 +41,7 @@ ok "User ready"
 
 # ── 2. create contract ───────────────────────────────────────────────────────
 info "2. Creating insurance contract..."
-CONTRACT=$(curl -sf -X POST "$API/api/v1/contracts/?user_id=$USER_ID" \
+CONTRACT=$(curl -sf -H "Authorization: Bearer $API_TOKEN" -X POST "$API/api/v1/contracts/?user_id=$USER_ID" \
   -H "Content-Type: application/json" \
   -d '{"provider_name":"Merkur Test","policy_number":"TEST-001"}')
 CONTRACT_ID=$(echo "$CONTRACT" | jq -r '.id')
@@ -49,7 +50,7 @@ ok "Contract: $CONTRACT_ID"
 
 # ── 3. create benefit rule ───────────────────────────────────────────────────
 info "3. Creating benefit rule (Medikamente, €200 YEARLY)..."
-RULE=$(curl -sf -X POST "$API/api/v1/contracts/$CONTRACT_ID/benefits?user_id=$USER_ID" \
+RULE=$(curl -sf -H "Authorization: Bearer $API_TOKEN" -X POST "$API/api/v1/contracts/$CONTRACT_ID/benefits?user_id=$USER_ID" \
   -H "Content-Type: application/json" \
   -d '{"benefit_name":"Medikamente","limit_amount":200.0,"limit_type":"YEARLY"}')
 RULE_ID=$(echo "$RULE" | jq -r '.id')
@@ -76,7 +77,7 @@ ok "Invoice: $INVOICE_ID"
 
 # ── 5. trigger submit-merkur ─────────────────────────────────────────────────
 info "5. Triggering Merkur submission (dry-run)..."
-TRIGGER_STATUS=$(curl -sf -X POST "$API/api/v1/invoices/$INVOICE_ID/submit-merkur?user_id=$USER_ID" | jq -r '.status')
+TRIGGER_STATUS=$(curl -sf -H "Authorization: Bearer $API_TOKEN" -X POST "$API/api/v1/invoices/$INVOICE_ID/submit-merkur?user_id=$USER_ID" | jq -r '.status')
 info "  immediate status: $TRIGGER_STATUS"
 
 # ── 6. poll until COMPLETED ───────────────────────────────────────────────────
@@ -93,7 +94,7 @@ ok "BenefitUsage created: amount_used=$USAGE_AMOUNT"
 
 # ── 8. verify quota via API ────────────────────────────────────────────────────
 info "8. Checking benefit quota via GET /contracts/$CONTRACT_ID/benefits..."
-BENEFITS=$(curl -sf "$API/api/v1/contracts/$CONTRACT_ID/benefits?user_id=$USER_ID")
+BENEFITS=$(curl -sf -H "Authorization: Bearer $API_TOKEN" "$API/api/v1/contracts/$CONTRACT_ID/benefits?user_id=$USER_ID")
 AMOUNT_USED=$(echo "$BENEFITS" | jq -r '.[0].amount_used')
 AMOUNT_REMAINING=$(echo "$BENEFITS" | jq -r '.[0].amount_remaining')
 [[ "$AMOUNT_USED" == "24.5" || "$AMOUNT_USED" == "24.50" ]] || fail "Expected amount_used=24.5, got: $AMOUNT_USED"
@@ -103,7 +104,7 @@ ok "amount_used=$AMOUNT_USED, amount_remaining=$AMOUNT_REMAINING (was €200)"
 info "9. Re-triggering submit-merkur (idempotency check)..."
 # Reset status to READY_FOR_MERKUR so trigger is accepted
 psql_exec "UPDATE invoices SET status='READY_FOR_MERKUR' WHERE id='$INVOICE_ID';" >/dev/null
-curl -sf -X POST "$API/api/v1/invoices/$INVOICE_ID/submit-merkur?user_id=$USER_ID" >/dev/null
+curl -sf -H "Authorization: Bearer $API_TOKEN" -X POST "$API/api/v1/invoices/$INVOICE_ID/submit-merkur?user_id=$USER_ID" >/dev/null
 poll_status "$INVOICE_ID" "COMPLETED"
 USAGE_COUNT2=$(psql_exec "SELECT COUNT(*) FROM benefit_usages WHERE invoice_id='$INVOICE_ID';")
 [[ "$USAGE_COUNT2" == "1" ]] || fail "Idempotency broken: expected 1 row, got $USAGE_COUNT2"
@@ -116,7 +117,7 @@ INVOICE2_ID=$(psql_exec "
   VALUES (gen_random_uuid(), '$USER_ID', '/mnt/storage/no-benefit.jpg', 10.0, NOW(), 'READY_FOR_MERKUR')
   RETURNING id;
 ")
-curl -sf -X POST "$API/api/v1/invoices/$INVOICE2_ID/submit-merkur?user_id=$USER_ID" >/dev/null
+curl -sf -H "Authorization: Bearer $API_TOKEN" -X POST "$API/api/v1/invoices/$INVOICE2_ID/submit-merkur?user_id=$USER_ID" >/dev/null
 poll_status "$INVOICE2_ID" "COMPLETED"
 USAGE_COUNT3=$(psql_exec "SELECT COUNT(*) FROM benefit_usages WHERE invoice_id='$INVOICE2_ID';")
 [[ "$USAGE_COUNT3" == "0" ]] || fail "Expected 0 BenefitUsage rows for no-benefit invoice, got $USAGE_COUNT3"

@@ -58,3 +58,7 @@ storage/
 # Frontend
 frontend/node_modules/
 frontend/dist/
+
+# Raw ÖGK calibration captures (may contain PII) and browser session (auth cookies)
+scripts/.oegk_capture/
+scripts/.oegk_session/

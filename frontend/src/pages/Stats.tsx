@@ -3,14 +3,14 @@ import { useAppContext } from "../state/AppContext";
 import { FamilyFilterPills } from "../components/FamilyFilterPills";
 import { KCCard } from "../components/KCCard";
 import { Avatar } from "../components/Avatar";
-import { getMonthlyStats, getYearlyStats, getMemberStats } from "../api";
+import { CURRENT_YEAR, getMonthlyStats, getYearlyStats, getMemberStats } from "../api";
 import type { MonthlyStats, YearlyStats, MemberStats } from "../api";
 import { formatEUR } from "../lib/format";
 import clsx from "clsx";
 
 type View = "monthly" | "yearly" | "members";
 
-const YEAR = 2026;
+const YEAR = CURRENT_YEAR;
 
 const MEMBER_COLORS: Record<string, string> = {
   maria: "#E84393", thomas: "#3B82F6", luisa: "#F59E0B", felix: "#10B981",
@@ -58,7 +58,7 @@ export function Stats() {
       {/* 2×2 stat grid */}
       <div className="px-5 grid grid-cols-2 gap-3 mb-5">
         <StatCard label="Ausgaben" value={formatEUR(totalPaid)} />
-        <StatCard label="Erstattet" value={formatEUR(totalReimbursed)} color="#16A34A" />
+        <StatCard label="Erstattet" value={`${(currentYear?.reimbursed_estimated ?? 0) > 0 ? "≈ " : ""}${formatEUR(totalReimbursed)}`} color="#16A34A" />
         <StatCard label="Eigenanteil" value={formatEUR(eigenanteil)} color="#EA580C" />
         <StatCard label="Erstattungsquote" value={`${reimbursementRate}%`} color="#0D9488" />
       </div>
@@ -132,7 +132,7 @@ export function Stats() {
               <div className="grid grid-cols-3 gap-2">
                 {[
                   { label: "Ausgaben", value: formatEUR(y.total_paid) },
-                  { label: "Erstattet", value: formatEUR(y.total_reimbursed), color: "#16A34A" },
+                  { label: "Erstattet", value: `${y.reimbursed_estimated > 0 ? "≈ " : ""}${formatEUR(y.total_reimbursed)}`, color: "#16A34A" },
                   { label: "Eigenanteil", value: formatEUR(y.eigenanteil), color: "#EA580C" },
                 ].map(({ label, value, color }) => (
                   <div key={label} className="text-center">
@@ -161,7 +161,7 @@ export function Stats() {
               <div className="grid grid-cols-3 gap-2 mb-3">
                 {[
                   { label: "Ausgaben", value: formatEUR(m.total_paid) },
-                  { label: "Erstattet", value: formatEUR(m.total_reimbursed), color: "#16A34A" },
+                  { label: "Erstattet", value: `${m.reimbursed_estimated > 0 ? "≈ " : ""}${formatEUR(m.total_reimbursed)}`, color: "#16A34A" },
                   { label: "Eigenanteil", value: formatEUR(m.eigenanteil), color: "#EA580C" },
                 ].map(({ label, value, color }) => (
                   <div key={label} className="text-center">

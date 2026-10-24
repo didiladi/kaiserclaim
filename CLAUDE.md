@@ -39,12 +39,22 @@ KaiserClaim has two distinct concerns that share the same data layer:
 ### Invoice state machine
 
 ```
-RECEIVED → OCR_PROCESSING → READY_FOR_OEGK → OEGK_SUBMITTED → OEGK_REFUNDED ↘
-                                                                                 READY_FOR_MERKUR → MERKUR_SUBMITTED → COMPLETED
-                                    ↑ Pharmacy MVP enters here directly ────────────────────────────────────────────────────┘
+RECEIVED → OCR_PROCESSING ─┬→ READY_FOR_OEGK → OEGK_SUBMITTING → OEGK_SUBMITTED ─(refund PDF)─┐
+                           │                                                                 ↓
+                           └→ READY_FOR_MERKUR ←─────────────────────────────────────────────┘
+READY_FOR_MERKUR → MERKUR_SUBMITTING → MERKUR_SUBMITTED → MERKUR_REIMBURSED / MERKUR_REJECTED → COMPLETED
+OCR finds no amount/date → NEEDS_REVIEW (fix via PATCH /invoices/{id}); any failure past a submit claim → FAILED
 ```
 
+**Routing** (`first_submission_status` in `schemas/payload.py`): an invoice with an explicit non-pharmacy category goes to `READY_FOR_OEGK`; pharmacy or uncategorised goes straight to `READY_FOR_MERKUR`. Submissions are user-triggered (`/submit-oegk`, `/submit-merkur`). Both claim the invoice with an atomic `READY_* → *_SUBMITTING` transition before touching the portal and never auto-retry after the claim (the click may already have gone through), so a stuck `FAILED` must be reconciled against the real portal by hand.
+
+**ÖGK refunds** (meine ÖGK): `poll_oegk_refunds` (beat, 09:00, cluster) queues one `sync_oegk_refunds(user_id)` per user with invoices waiting on ÖGK (`READY_FOR_OEGK`, `OEGK_SUBMITTING`, `OEGK_SUBMITTED`, `FAILED`; the task expires after 20 h). The sync runs on the `oegk` queue (the cluster worker never consumes it) because `OegkBot` is headed for ID-Austria 2FA: run `scripts/run_oegk_worker.sh` on the desktop. `OegkBot.download_refunds` downloads every PDF in "Eingereichte Rechnungen", and each is sent to `POST /oegk/refund-pdfs` (via `API_BASE_URL`; without it the worker ingests directly, for single-host dev). The cluster owns the files because the Merkur upload reads them. `services/oegk_ingest.py` parses the PDF (`services/oegk_result_parser.py`), dedupes it (no case number: `OegkDocument.dedupe_key` hashes patient, doctor, dates and amounts), and matches an invoice on **patient + treatment day (Vienna) within the PDF's service range + invoice amount**; the patient is the `FamilyMember.svnr` when stored, else a name check. Exactly one match: the PDF becomes an `InvoiceAttachment` (`oegk_refund`) and the invoice jumps to `READY_FOR_MERKUR`. Zero or several matches: the PDF is stored, a notification fires once, and it is retried on every sync (it links as soon as the invoice exists). `submit_to_merkur` uploads the invoice's own file plus all attachments in one Vorgang and checks that every file exists *before* claiming the invoice.
+
+**ÖGK submission is switched off** (`OEGK_SUBMIT_ENABLED`, default false): `POST /invoices/{id}/submit-oegk` returns 501 and `submit_to_oegk` is a no-op, because the meine ÖGK submit flow is not calibrated (see "meine ÖGK calibration status"). The interim path is to submit by hand in meine ÖGK and move the invoice to `OEGK_SUBMITTED` with the "Als bei ÖGK eingereicht markieren" button on the invoice detail page (`PATCH /invoices/{id}/status`); refunds are matched automatically, and unconfirmed `READY_FOR_OEGK` invoices are matched too.
+
 Pharmacy receipts (MVP) skip ÖGK entirely: `run_ocr` sets status to `READY_FOR_MERKUR` directly.
+
+**API response fields**: `InvoiceRead` derives `pipeline`, `current_step`, `reimbursed_amount`, `result_state` and `oegk_reimbursed_amount` in a `model_validator(mode="before")`. Do not go back to overriding `model_validate`: FastAPI validates responses through a TypeAdapter and never calls it (that silently left every field at its default). Endpoints that return invoices must eager-load `merkur_document` and `oegk_document`.
 
 **Pipeline variant detection** — computed at read time in `schemas/payload.py` (`_derive_pipeline`). If `invoice.category` contains "medikament" or "apotheke" (case-insensitive), the invoice is `pharmacy`; otherwise `standard`. Pharmacy path shows 5 stepper steps in the UI; standard shows all 8.
 
@@ -53,25 +63,31 @@ Pharmacy receipts (MVP) skip ÖGK entirely: `run_ocr` sets status to `READY_FOR_
 | Model | Key fields | Notes |
 |---|---|---|
 | `User` | `id`, `email` | One user owns everything |
-| `FamilyMember` | `user_id`, `member_key`, `name`, `color`, `initials` | `member_key` is a stable slug (`maria`, `thomas`…) used as the filter identifier by the frontend |
+| `FamilyMember` | `user_id`, `member_key`, `name`, `color`, `initials`, `svnr` | `member_key` is a stable slug (`maria`, `thomas`…) used as the filter identifier by the frontend. `svnr` (10-digit Sozialversicherungsnummer) is write-only PII: the API only returns `has_svnr`; never log it or put it in fixtures |
 | `InsuranceContract` | `user_id`, `provider_name`, `policy_number` | |
 | `BenefitRule` | `contract_id`, `benefit_name`, `limit_amount`, `limit_type` | Populated by `services/llm_auditor.py` |
 | `Invoice` | `user_id`, `family_member_id`, `category`, `status`, … | `category` is denormalized for display; `family_member_id` FK to `FamilyMember` |
 | `BenefitUsage` | `invoice_id`, `benefit_rule_id`, `amount_used` | Appended when invoice reaches COMPLETED |
+| `OegkDocument` | `user_id`, `dedupe_key` (unique), `file_path`, `invoice_id`, amounts, dates | A meine ÖGK refund PDF. No raw text is stored (the PDF holds IBAN and address) |
+| `InvoiceAttachment` | `invoice_id`, `kind`, `file_path` | Extra files uploaded to Merkur with the invoice's own file (`oegk_refund`) |
 
 ### API endpoint map
 
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/api/v1/invoices/upload` | Upload invoice file → triggers OCR worker |
-| GET | `/api/v1/invoices/` | List invoices with `member_key`, `status_group`, `search` filters |
+| GET | `/api/v1/invoices/` | List invoices with `member_key`, `status_group`, `search`, `pipeline` filters |
 | GET | `/api/v1/invoices/{id}` | Get single invoice |
+| PATCH | `/api/v1/invoices/{id}` | Correct amount/date/provider/patient (NEEDS_REVIEW recovery) |
+| POST | `/api/v1/invoices/{id}/submit-oegk` | Queue ÖGK submission (READY_FOR_OEGK only). 501 while `OEGK_SUBMIT_ENABLED` is off |
+| POST | `/api/v1/oegk/refund-pdfs` | Desktop ÖGK worker uploads one refund PDF: store, dedupe, match, attach (`outcome`: linked / unmatched / ambiguous / duplicate / not_a_refund) |
+| PATCH | `/api/v1/family/{id}` | Set or clear a member's `svnr` |
 | POST | `/api/v1/invoices/{id}/submit-merkur` | Manually trigger Merkur submission |
 | GET | `/api/v1/contracts/` | List contracts |
 | POST | `/api/v1/contracts/{id}/parse-pdf` | Parse contract PDF with Gemini |
 | GET | `/api/v1/contracts/{id}/benefits` | Benefit quotas with remaining amounts |
 | GET/POST | `/api/v1/family/` | List / create family members |
-| GET | `/api/v1/dashboard/summary` | Hero figures: `total_paid`, `total_reimbursed` (82% rule), `in_progress_count`, `eigenanteil`, `benefit_alerts` |
+| GET | `/api/v1/dashboard/summary` | Hero figures, filterable by `member_key` and `pipeline` (`standard` = doctors, `pharmacy`). Refunds add up from two sources: `oegk_refunded` (real, from the linked ÖGK PDF, counted as soon as it is matched) and Merkur (`merkur_refunded` confirmed, plus an estimate of 82% of the invoice minus the ÖGK part where no Merkur result is linked yet). `total_reimbursed` = both, `eigenanteil` = settled invoices only. `claimed_amount` = invoice totals submitted to ÖGK or Merkur, `claimed_open_amount` = of those still undecided, `not_yet_claimed_amount` = not submitted anywhere yet (`pending_amount` = open + not yet claimed). Also `in_progress_count`, `needs_attention_count`, `benefit_alerts`. `year` defaults to the current year; invoices are bucketed by their own date in Vienna time |
 | GET | `/api/v1/stats/monthly` | Monthly aggregations, filtered by `year` and `member_key` |
 | GET | `/api/v1/stats/yearly` | Per-year totals |
 | GET | `/api/v1/stats/members` | Per-member breakdown with category split |
@@ -80,9 +96,30 @@ Pharmacy receipts (MVP) skip ÖGK entirely: `run_ocr` sets status to `READY_FOR_
 
 The API is fully async (FastAPI + asyncpg). Celery workers are synchronous; they bridge into async code via `asyncio.get_event_loop().run_until_complete()` in `workers/tasks.py`. Do not introduce `await` directly inside Celery task bodies — use the `_run()` helper or extract an `async def` and call `_run()` on it.
 
-### Multi-tenancy
+### Auth and multi-tenancy
 
-Every table has a `user_id` column. All queries in API endpoints must filter by `current_user.id`. The auth layer in `api/dependencies.py` is a stub (user_id passed as a parameter) — replace with JWT extraction before exposing to multiple users.
+Every `/api/v1` route (except the webhook, which has its own `X-Webhook-Secret`) goes through `get_current_user` in `api/dependencies.py`, which requires `Authorization: Bearer <API_TOKEN>` (constant-time compare). It fails closed: an empty or `CHANGE_ME` token rejects everything. `user_id` stays a query param that only selects the tenant row; the token is the credential. The frontend asks for the token on its login screen, keeps it in `localStorage`, and returns to login on any 401. CORS allows only `CORS_ORIGINS` (default: `kaiserclaim.home`, `kaiserclaim.didiladi.com`, `localhost:5173`). `tests/test_auth.py` asserts every API route is protected, so a new endpoint cannot forget the dependency. Scripts and the desktop ÖGK worker need `API_TOKEN` in their environment. Replace with per-user JWTs before going multi-user.
+
+Every table has a `user_id` column. All queries in API endpoints must filter by `current_user.id`.
+
+### Backups
+
+The live database is `kaiserclaim` on the shared Postgres in namespace `family` (`postgres-postgresql`), not a Postgres in this repo's manifests; the repo's placeholder `secret.yaml` does not reflect that. `k8s/base/backup.yaml` adds a nightly CronJob (03:15, 30 copies) that writes to the NAS (`/volume1/K3S_Backups/kaiserclaim/`): `db/db-<ts>.sql.gz` (pg_dump) and `storage/storage-<ts>.tar.gz` (invoice files and Merkur documents; browser session dirs excluded because they hold auth cookies). The shared Postgres also has its own nightly `pg_dumpall` (`home-lab/apps/postgres`). Apply with `kubectl apply -k k8s/overlays/homelab/`.
+
+Restore (check the dump first, restore into an empty DB):
+
+```bash
+gunzip -c db-<ts>.sql.gz | psql "<postgresql URL of an empty database>"
+tar -xzf storage-<ts>.tar.gz -C <storage root>
+```
+
+### Merkur result reconciliation
+
+`sync_merkur_inbox` (daily 07:00) stores each Postfach result once (`geschaeftsfall_nr` is unique) and links it to exactly one invoice by patient + date + amount (`_process_scraped_doc`). Candidates are invoices in `MERKUR_SUBMITTED`, `MERKUR_SUBMITTING` or `FAILED`: a result arriving is the proof Merkur received a claim whose submit step crashed or missed the success signal, so it rescues those invoices to `MERKUR_REIMBURSED`/`MERKUR_REJECTED`. Stored documents that are still `UNKNOWN` or unlinked are re-evaluated every sync. New results that match no invoice, or several, are not dropped silently: they trigger a notification for manual review.
+
+### Notifications
+
+`services/notifier.py` posts to Home Assistant's `notify.<HA_NOTIFY_SERVICE>` (Signal). It is a no-op until `HA_URL`, `HA_TOKEN` and `HA_NOTIFY_SERVICE` are real values, and never raises. Every Celery task uses `NotifyOnFailure` (`workers/tasks.py`), which pushes once a task fails for good (retries do not count). `scan_unused_benefits` pushes a digest on Mondays, or daily once a benefit is within 7 days of expiring. Keep messages free of PII.
 
 ### Playwright bots
 
@@ -151,6 +188,35 @@ frontend/src/
 4. Import the model in `alembic/env.py` (it already imports `Base` from `models/domain`; just ensure the class is defined there).
 
 ---
+
+## meine ÖGK calibration status
+
+Target portal is meine ÖGK (`meine.oegk.at`, ID Austria login, always manual), not the old Kundenportal that `OegkBot` still points at. Calibrate with `python scripts/calibrate_oegk.py [--phase lookup|review]`; captures land in `scripts/.oegk_capture/` (gitignored, PII: IBAN, birth date, SV numbers).
+
+**Calibrated (2026-10-24):**
+- Submit form up to the last step: date page (`#datumKostenerstattung`, `…btnContinue`), type tabs, upload (`*fileUpload_input` + "Hinzufügen"), für-wen tabs, prefilled bank data, email/phone selects, "Weiter" (`*:weiter`). JSF ids contain `j_idt` parts: match by id suffix or label, never the full id.
+- "Eingereichte Rechnungen abfragen": `#vonDat` / `#bisDat` + OK, rows in `#cb_list_done` (`.cb_date`, `.cb_title`, `.cb_status`, `.cb_details`, `.cb_download`), PDF icon triggers a real download. The details page shows patient, SV number, Rechnungsbetrag, doctor and refund.
+- Refund PDF parsing: `services/oegk_result_parser.py` (`OegkDocument` rows, identity = `dedupe_key`, there is no case number).
+
+**KNOWN GAP, deliberately not calibrated (decided 2026-10-24):** the `--phase review` run was skipped, so these are unknown:
+- The input for the insured person under "für Mitversicherte" (the user types the SV number; selector, format handling and the portal's reaction to a wrong number are unseen).
+- The review page after the last "Weiter", the label of the final send button, and the success / reference-number signal after sending.
+
+Consequences:
+- Submission to meine ÖGK cannot be built or verified. The selectors in `OegkBot.submit_invoice` are still the old guesses for the Kundenportal and must not be trusted. `submit_to_oegk` stays unusable until the gap is closed.
+- Lookup and PDF download (`OegkBot.download_refunds`, `sync_oegk_refunds`, matching) are not affected, but the bot has so far only run against a synthetic fixture. First live check: `python scripts/oegk_download_refunds.py`.
+- Interim path: submit by hand in meine ÖGK, let KaiserClaim download and match the refund PDFs, then forward photo + PDF to Merkur. Submission stays disabled via `OEGK_SUBMIT_ENABLED` (default false).
+- To close the gap: run `python scripts/calibrate_oegk.py --phase review` (stop before any send button), then implement and fixture-test the submit steps.
+
+## Merkur QR-Code-Einreichung (investigated 2026-10-24, not adopted)
+
+Merkur's wizard has a separate "QR-Code-Einreichung" route (`scripts/calibrate_merkur_qr.py`). What the capture showed:
+- Four steps: QR-Code-Scan, Personenzuweisung, Überweisungskonto, Abschluss. **No file input at all**: neither the receipt photo nor any other file can be attached on this route.
+- The scan is a live **webcam** widget (`zxing-scanner` with a `<video>`), prompt: "Halten Sie den QR-Code, welcher auf Ihrem **Zusatzbeleg** abgebildet ist, vor die Kamera." There is also a help link ("Haben Sie Probleme beim Scannen des Apotheken-QR-Code?", not opened yet).
+- A first manual try with a laptop webcam failed to scan the receipt.
+- The prompt names the code on a *Zusatzbeleg*. The Austrian private insurers and the Apothekerkammer introduced a QR code appended to the pharmacy receipt for exactly this (VVO press text, 2023). It is probably **not** the RKSV cash-register QR that `services/rksv_parser.py` decodes; the payload format is unknown.
+
+Decision: pharmacy receipts keep using the calibrated generic upload (`MerkurBot._submit`, photo upload). Building the QR route would need a fake-camera feed (`--use-file-for-fake-video-capture`) and the unknown payload format, for no attachment support. Open questions for the Merkur Berater: what exactly is the Zusatzbeleg code, does the pharmacy print it on request, and is a generic photo upload processed more slowly than a QR submission?
 
 ## Merkur portal selector calibration
 

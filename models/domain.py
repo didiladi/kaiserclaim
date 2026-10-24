@@ -3,7 +3,7 @@ import enum
 from datetime import datetime
 
 from sqlalchemy import (
-    Column, String, Float, DateTime, ForeignKey, Enum as SAEnum, Text, func
+    Column, String, Float, Date, DateTime, ForeignKey, Enum as SAEnum, Text, func
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -39,13 +39,17 @@ class InvoiceStatus(str, enum.Enum):
     RECEIVED = "RECEIVED"
     OCR_PROCESSING = "OCR_PROCESSING"
     READY_FOR_OEGK = "READY_FOR_OEGK"
+    OEGK_SUBMITTING = "OEGK_SUBMITTING"
     OEGK_SUBMITTED = "OEGK_SUBMITTED"
     OEGK_REFUNDED = "OEGK_REFUNDED"
     READY_FOR_MERKUR = "READY_FOR_MERKUR"
+    MERKUR_SUBMITTING = "MERKUR_SUBMITTING"
     MERKUR_SUBMITTED = "MERKUR_SUBMITTED"
     MERKUR_REIMBURSED = "MERKUR_REIMBURSED"
     MERKUR_REJECTED = "MERKUR_REJECTED"
     COMPLETED = "COMPLETED"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+    FAILED = "FAILED"
 
 
 class MerkurResultState(str, enum.Enum):
@@ -69,6 +73,7 @@ class User(Base):
     invoices = relationship("Invoice", back_populates="user", cascade="all, delete-orphan")
     family_members = relationship("FamilyMember", back_populates="user", cascade="all, delete-orphan")
     merkur_documents = relationship("MerkurDocument", back_populates="user", cascade="all, delete-orphan")
+    oegk_documents = relationship("OegkDocument", back_populates="user", cascade="all, delete-orphan")
 
 
 class FamilyMember(Base):
@@ -80,9 +85,14 @@ class FamilyMember(Base):
     name = Column(String, nullable=False)
     color = Column(String, nullable=False)        # hex color, e.g. '#E84393'
     initials = Column(String, nullable=False)
+    svnr = Column(String, nullable=True)          # 10-digit Sozialversicherungsnummer; PII, never log or expose
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     user = relationship("User", back_populates="family_members")
+
+    @property
+    def has_svnr(self) -> bool:
+        return bool(self.svnr)
     invoices = relationship("Invoice", back_populates="family_member")
 
 
@@ -176,6 +186,25 @@ class Invoice(Base):
     family_member = relationship("FamilyMember", back_populates="invoices")
     benefit_usages = relationship("BenefitUsage", back_populates="invoice", cascade="all, delete-orphan")
     merkur_document = relationship("MerkurDocument", back_populates="invoice", uselist=False)
+    oegk_document = relationship("OegkDocument", back_populates="invoice", uselist=False)
+    attachments = relationship("InvoiceAttachment", back_populates="invoice", cascade="all, delete-orphan")
+
+
+class AttachmentKind(str, enum.Enum):
+    OEGK_REFUND = "oegk_refund"
+
+
+class InvoiceAttachment(Base):
+    """Extra file sent to Merkur with the invoice's own file (e.g. the ÖGK refund PDF)."""
+    __tablename__ = "invoice_attachments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    invoice_id = Column(UUID(as_uuid=True), ForeignKey("invoices.id", ondelete="CASCADE"), nullable=False, index=True)
+    kind = Column(String, nullable=False)
+    file_path = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    invoice = relationship("Invoice", back_populates="attachments")
 
 
 class BenefitUsage(Base):
@@ -210,3 +239,25 @@ class MerkurDocument(Base):
 
     user = relationship("User", back_populates="merkur_documents")
     invoice = relationship("Invoice", back_populates="merkur_document")
+
+
+class OegkDocument(Base):
+    """A meine ÖGK refund confirmation PDF (no case number: identified by dedupe_key)."""
+    __tablename__ = "oegk_documents"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    dedupe_key = Column(String, unique=True, nullable=False, index=True)
+    file_path = Column(String, nullable=True)
+    patient_name = Column(String, nullable=True)
+    doctor_name = Column(String, nullable=True)
+    service_date = Column(Date, nullable=True)
+    payout_date = Column(Date, nullable=True)
+    invoice_amount = Column(Float, nullable=True)
+    reimbursed_amount = Column(Float, nullable=True)
+    family_member_id = Column(UUID(as_uuid=True), ForeignKey("family_members.id", ondelete="SET NULL"), nullable=True)
+    invoice_id = Column(UUID(as_uuid=True), ForeignKey("invoices.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    user = relationship("User", back_populates="oegk_documents")
+    invoice = relationship("Invoice", back_populates="oegk_document")
