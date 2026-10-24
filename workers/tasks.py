@@ -6,6 +6,9 @@ Each task updates the Invoice status atomically so the API always reflects
 the true pipeline state.
 """
 import asyncio
+import shutil
+import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -17,9 +20,10 @@ from celery.schedules import crontab
 
 from core.config import get_settings
 from core.database import AsyncSessionLocal
-from models.domain import BenefitKind, BenefitRule, BenefitUsage, InsuredPerson, Invoice, InvoiceStatus, MerkurDocument, MerkurResultState, ResetPeriod, Tariff, User
+from models.domain import AttachmentKind, BenefitKind, BenefitRule, BenefitUsage, InsuredPerson, Invoice, InvoiceAttachment, InvoiceStatus, MerkurDocument, MerkurResultState, ResetPeriod, Tariff, User
 from sqlalchemy import func, select, update
 from schemas.payload import first_submission_status
+from services.oegk_ingest import ingest_refund_pdf
 from services.ocr_engine import pdf_to_text
 from services.regex_parser import parse_pharmacy_receipt
 from services.rksv_parser import extract_rksv_from_image
@@ -57,7 +61,7 @@ celery_app.conf.update(
 OEGK_QUEUE = "oegk"
 celery_app.conf.task_routes = {
     "workers.tasks.submit_to_oegk": {"queue": OEGK_QUEUE},
-    "workers.tasks.poll_oegk_refund": {"queue": OEGK_QUEUE},
+    "workers.tasks.sync_oegk_refunds": {"queue": OEGK_QUEUE},
 }
 celery_app.conf.beat_schedule = {
     "merkur-inbox-daily": {
@@ -136,6 +140,20 @@ async def _get_invoice(invoice_id: str) -> Invoice | None:
         return await db.get(Invoice, invoice_id)
 
 
+async def _get_attachment_paths(invoice_id: str) -> list[str]:
+    """Extra files to upload to Merkur with the invoice's own file, oldest first."""
+    async with AsyncSessionLocal() as db:
+        rows = await db.execute(
+            select(InvoiceAttachment.file_path)
+            .where(
+                InvoiceAttachment.invoice_id == invoice_id,
+                InvoiceAttachment.kind == AttachmentKind.OEGK_REFUND.value,
+            )
+            .order_by(InvoiceAttachment.created_at)
+        )
+        return [r[0] for r in rows]
+
+
 async def _try_transition(invoice_id: str, expected: InvoiceStatus, new: InvoiceStatus) -> bool:
     """Atomically move an invoice from `expected` to `new`.
 
@@ -192,10 +210,7 @@ def run_ocr(self, invoice_id: str) -> dict:
         if not invoice:
             raise ValueError(f"Invoice {invoice_id} not found")
 
-        # Try fast RKSV QR extraction first (images only)
-        from services.rksv_parser import extract_qr_codes
-        qr_raw = extract_qr_codes(invoice.file_path)
-        logger.debug("run_ocr %s: %d QR code(s) found", invoice_id, len(qr_raw or []))  # never log QR contents
+        # Try fast RKSV QR extraction first (images and PDFs); never log QR contents
         rksv = extract_rksv_from_image(invoice.file_path)
 
         if rksv:
@@ -273,6 +288,12 @@ def submit_to_merkur(self, invoice_id: str) -> dict:
             "reason": f"invoice not in READY_FOR_MERKUR (was {invoice.status.value})",
         }
 
+    # Resolve every file before the claim: a missing refund PDF must not burn it.
+    upload_files = [invoice.file_path] + _run(_get_attachment_paths(invoice_id))
+    missing = [Path(f).name for f in upload_files if not Path(f).exists()]
+    if missing:
+        raise FileNotFoundError(f"Merkur upload file(s) not found: {', '.join(missing)}")
+
     claimed = _run(_try_transition(
         invoice_id, InvoiceStatus.READY_FOR_MERKUR, InvoiceStatus.MERKUR_SUBMITTING
     ))
@@ -286,7 +307,7 @@ def submit_to_merkur(self, invoice_id: str) -> dict:
             bot = MerkurBot()
             date_str = _portal_date(invoice.date)
             success = _run(bot.submit_pharmacy_receipt(
-                invoice_pdf=invoice.file_path,
+                invoice_pdf=upload_files,
                 amount=invoice.amount or 0.0,
                 date=date_str,
                 patient_name=invoice.patient_name or "",
@@ -318,6 +339,10 @@ def submit_to_oegk(self, invoice_id: str) -> dict:
     because the click may already have reached the real portal. Only the
     pre-claim invoice lookup is safe to retry.
     """
+    if not settings.oegk_submit_enabled:
+        # Disabled until the meine ÖGK submit flow is calibrated; leave the invoice untouched.
+        return {"invoice_id": invoice_id, "skipped": True, "reason": "oegk_submit_enabled is off"}
+
     try:
         invoice = _run(_get_invoice(invoice_id))
         if not invoice:
@@ -692,61 +717,91 @@ def _should_push_reminders(reminders: list, today) -> bool:
     return today.weekday() == 0 or any(days <= 7 for _, _, days in reminders)
 
 
-async def _oegk_submitted_ids(invoice_id: str | None = None) -> list[tuple[str, str]]:
-    """(invoice_id, user_id) of invoices awaiting an ÖGK refund."""
+async def _oegk_waiting_user_ids() -> list[str]:
+    """Users with invoices still waiting for an ÖGK refund (submitted by the bot or by hand)."""
     async with AsyncSessionLocal() as db:
-        stmt = select(Invoice.id, Invoice.user_id).where(Invoice.status == InvoiceStatus.OEGK_SUBMITTED)
-        if invoice_id:
-            stmt = stmt.where(Invoice.id == invoice_id)
-        rows = (await db.execute(stmt)).all()
-        return [(str(r[0]), str(r[1])) for r in rows]
+        rows = await db.execute(
+            select(Invoice.user_id).where(Invoice.status.in_([
+                InvoiceStatus.READY_FOR_OEGK,
+                InvoiceStatus.OEGK_SUBMITTING,
+                InvoiceStatus.OEGK_SUBMITTED,
+                InvoiceStatus.FAILED,
+            ])).distinct()
+        )
+        return [str(r[0]) for r in rows]
 
 
 @celery_app.task
 def poll_oegk_refunds() -> dict:
-    """Daily: fan out poll_oegk_refund for every invoice waiting on ÖGK."""
-    waiting = _run(_oegk_submitted_ids())
-    for invoice_id, _ in waiting:
-        poll_oegk_refund.delay(invoice_id)
-    return {"polled": len(waiting)}
+    """Daily: queue one refund sync per user that has invoices waiting on ÖGK."""
+    users = _run(_oegk_waiting_user_ids())
+    for user_id in users:
+        # Expire before the next daily run, so a switched-off desktop worker
+        # does not wake up to a week of identical syncs.
+        sync_oegk_refunds.apply_async(args=[user_id], expires=20 * 3600)
+    return {"users": len(users)}
+
+
+def _post_refund_pdf(user_id: str, content: bytes) -> dict:
+    """Send one PDF to the API (the cluster owns the storage the Merkur upload reads)."""
+    boundary = uuid.uuid4().hex
+    body = (
+        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="refund.pdf"\r\n'
+        f"Content-Type: application/pdf\r\n\r\n"
+    ).encode() + content + f"\r\n--{boundary}--\r\n".encode()
+    import json
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"{settings.api_base_url.rstrip('/')}/api/v1/oegk/refund-pdfs?user_id={user_id}",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {settings.api_token}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.load(resp)
+
+
+async def _ingest_local(user_id: str, content: bytes) -> dict:
+    async with AsyncSessionLocal() as db:
+        r = await ingest_refund_pdf(db, uuid.UUID(user_id), content, settings.storage_root)
+    return {"outcome": r.outcome, "is_new": r.is_new}
+
+
+def _ingest_refund_file(user_id: str, path: str) -> dict:
+    content = Path(path).read_bytes()
+    if settings.api_base_url:
+        return _post_refund_pdf(user_id, content)
+    return _run(_ingest_local(user_id, content))  # single-host dev: worker shares DB and volume
 
 
 @celery_app.task(bind=True)
-def poll_oegk_refund(self, invoice_id: str) -> dict:
-    """Check the ÖGK portal for a refund PDF for an OEGK_SUBMITTED invoice.
+def sync_oegk_refunds(self, user_id: str, since: str | None = None) -> dict:
+    """Download every refund PDF from meine ÖGK and match each to an invoice.
 
-    No Celery retry loop: refunds take days or weeks, so poll_oegk_refunds
-    simply asks again tomorrow. The portal does not (yet) tell us which
-    invoice a refund document belongs to, so the invoice only advances when it
-    is the user's single invoice awaiting a refund; with several in flight the
-    PDF is saved but the invoices stay put for manual matching.
+    Runs on the desktop worker (-Q oegk, headed browser for ID Austria 2FA). Each
+    PDF is deduplicated and matched on patient + treatment day + invoice amount
+    by services.oegk_ingest; a linked invoice moves to READY_FOR_MERKUR with the
+    PDF attached. No Celery retry: it is idempotent and runs again tomorrow.
+    `since` (DD.MM.YYYY) widens the portal's default 12-month window for a backfill.
     """
-    invoice = _run(_get_invoice(invoice_id))
-    if not invoice:
-        raise ValueError(f"Invoice {invoice_id} not found")
-    if invoice.status != InvoiceStatus.OEGK_SUBMITTED:
-        return {"invoice_id": invoice_id, "status": invoice.status.value, "skipped": True}
+    work_dir = Path(settings.storage_root) / ".oegk_downloads" / uuid.uuid4().hex
+    try:
+        paths = _run(OegkBot().download_refunds(str(work_dir), since))
+        outcomes = Counter()
+        unmatched_new = 0
+        for path in paths:
+            result = _ingest_refund_file(user_id, path)
+            outcomes[result["outcome"]] += 1
+            if result.get("is_new") and result["outcome"] in ("unmatched", "ambiguous"):
+                unmatched_new += 1
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
-    # Output directory is derived server-side, never taken from a caller.
-    output_dir = Path(settings.storage_root) / str(invoice.user_id) / "oegk_refunds"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    refund_path = _run(OegkBot().download_refund_pdf(str(output_dir)))
-    if not refund_path:
-        return {"invoice_id": invoice_id, "status": "OEGK_SUBMITTED", "refund": "pending"}
-
-    in_flight = [
-        i for i, u in _run(_oegk_submitted_ids()) if u == str(invoice.user_id)
-    ]
-    if len(in_flight) != 1:
-        return {
-            "invoice_id": invoice_id,
-            "status": "OEGK_SUBMITTED",
-            "refund_pdf": refund_path,
-            "refund": "needs_manual_match",
-        }
-
-    # Refund received: the ÖGK leg is done; the Merkur leg is ready to submit.
-    _run(_set_status(invoice_id, InvoiceStatus.OEGK_REFUNDED))
-    _run(_set_status(invoice_id, InvoiceStatus.READY_FOR_MERKUR))
-    return {"invoice_id": invoice_id, "status": "READY_FOR_MERKUR", "refund_pdf": refund_path}
+    if unmatched_new:
+        from services.notifier import notify
+        notify(f"KaiserClaim: {unmatched_new} new ÖGK refund PDF(s) need manual matching")
+    return {"user_id": user_id, "downloaded": len(paths), **outcomes}

@@ -24,6 +24,7 @@ is monkeypatched — no real Playwright/portal calls happen here.
 """
 import asyncio
 import uuid
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import select
@@ -37,6 +38,11 @@ from workers import tasks as tasks_module
 from workers.tasks import _try_transition, run_ocr, submit_to_merkur
 
 TEST_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+
+# submit_to_merkur checks the upload files exist before claiming the invoice.
+_FIXTURE = Path("/tmp/kaiserclaim-test-storage/fixture.pdf")
+_FIXTURE.parent.mkdir(parents=True, exist_ok=True)
+_FIXTURE.write_bytes(b"%PDF-1.4 test")
 _TEST_DB_URL = get_settings().database_url
 
 # Force workers.tasks' internal AsyncSessionLocal onto a NullPool engine so
@@ -197,4 +203,53 @@ def test_run_ocr_ready_for_merkur_on_success():
         result = _run_task(run_ocr.run, invoice_id)
 
     assert result["status"] == "READY_FOR_MERKUR"
+    assert _get_status(invoice_id) == InvoiceStatus.READY_FOR_MERKUR
+
+
+def test_submit_to_merkur_uploads_photo_and_refund_pdf_together():
+    """The invoice's own file plus every ÖGK refund attachment go in one upload."""
+    from models.domain import AttachmentKind, InvoiceAttachment
+
+    refund = Path("/tmp/kaiserclaim-test-storage/refund-attachment.pdf")
+    refund.write_bytes(b"%PDF-1.4 refund")
+    invoice_id = _make_invoice(InvoiceStatus.READY_FOR_MERKUR)
+
+    async def _attach():
+        async with _TestSession() as db:
+            db.add(InvoiceAttachment(invoice_id=invoice_id, kind=AttachmentKind.OEGK_REFUND.value, file_path=str(refund)))
+            await db.commit()
+    asyncio.run(_attach())
+
+    bot = AsyncMock(return_value=True)
+    with patch("workers.tasks.MerkurBot.submit_pharmacy_receipt", new=bot), \
+         patch.object(tasks_module.settings, "merkur_dry_run", False):
+        result = _run_task(submit_to_merkur.run, invoice_id)
+
+    assert result["status"] == "MERKUR_SUBMITTED"
+    assert bot.await_args.kwargs["invoice_pdf"] == [str(_FIXTURE), str(refund)]
+
+
+def test_submit_to_merkur_missing_attachment_does_not_claim():
+    """A refund PDF that is gone must fail before the claim, leaving the invoice retryable."""
+    from models.domain import AttachmentKind, InvoiceAttachment
+
+    invoice_id = _make_invoice(InvoiceStatus.READY_FOR_MERKUR)
+
+    async def _attach():
+        async with _TestSession() as db:
+            db.add(InvoiceAttachment(invoice_id=invoice_id, kind=AttachmentKind.OEGK_REFUND.value,
+                                     file_path="/tmp/kaiserclaim-test-storage/does-not-exist.pdf"))
+            await db.commit()
+    asyncio.run(_attach())
+
+    with patch(
+        "workers.tasks.MerkurBot.submit_pharmacy_receipt",
+        new=AsyncMock(side_effect=AssertionError("bot must not be invoked")),
+    ), patch.object(tasks_module.settings, "merkur_dry_run", False):
+        try:
+            _run_task(submit_to_merkur.run, invoice_id)
+            assert False, "expected FileNotFoundError"
+        except FileNotFoundError:
+            pass
+
     assert _get_status(invoice_id) == InvoiceStatus.READY_FOR_MERKUR

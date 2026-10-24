@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     # Set True only once the persistent session is known to be valid.
     oegk_headless: bool = False
 
+    # ÖGK submission is OFF until the meine ÖGK submit flow is calibrated (see the
+    # "meine ÖGK calibration status" gap in CLAUDE.md). The refund lookup/download
+    # is independent of this flag.
+    oegk_submit_enabled: bool = False
+
     # Base URL of the API (e.g. https://kaiserclaim.home). The desktop ÖGK worker
     # uses it to fetch invoice files that live on the cluster's volume.
     api_base_url: str = ""

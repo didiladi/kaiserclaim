@@ -48,3 +48,48 @@ def test_comma_decimal_separator():
     result = parse_rksv(qr)
     assert result is not None
     assert result.amount == pytest.approx(99.99, abs=0.001)
+
+
+def test_other_certificate_prefix_accepted():
+    qr = "_R1-AT100_K_B_2024-06-01T10:00:00_1,00_0,00_0,00_0,00_0,00_C_P_S"
+    result = parse_rksv(qr)
+    assert result is not None
+    assert result.amount == pytest.approx(1.00, abs=0.001)
+
+
+def test_refund_flagged():
+    qr = "_R1-AT0_K_B_2024-06-01T10:00:00_-10,00_0,00_0,00_0,00_0,00_C_P_S"
+    result = parse_rksv(qr)
+    assert result.is_refund is True
+    assert result.amount == pytest.approx(10.00, abs=0.001)
+    assert parse_rksv(_VALID).is_refund is False
+
+
+def _write_qr(path, text):
+    zxingcpp = pytest.importorskip("zxingcpp")
+    from PIL import Image
+    img = zxingcpp.write_barcode(zxingcpp.BarcodeFormat.QRCode, text, width=300, height=300)
+    Image.fromarray(img).convert("RGB").save(path)
+
+
+def test_image_roundtrip(tmp_path):
+    from services.rksv_parser import extract_rksv_from_image
+    f = tmp_path / "receipt.png"
+    _write_qr(f, _VALID)
+    result = extract_rksv_from_image(str(f))
+    assert result is not None
+    assert result.amount == pytest.approx(21.00, abs=0.001)
+
+
+def test_pdf_upload_is_scanned(tmp_path):
+    """A PDF upload must not crash the scan (it used to raise in Pillow)."""
+    pytest.importorskip("pypdfium2")
+    from PIL import Image
+    from services.rksv_parser import extract_rksv_from_image
+    png = tmp_path / "q.png"
+    _write_qr(png, _VALID)
+    from PIL import JpegImagePlugin  # noqa: F401  (registers JPEG for the PDF writer)
+    pdf = tmp_path / "receipt.pdf"
+    Image.open(png).save(pdf)
+    result = extract_rksv_from_image(str(pdf))
+    assert result is not None

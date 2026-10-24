@@ -1,12 +1,10 @@
 """
-Tests for the ÖGK arm: category routing, idempotent submission, refund polling.
+Tests for the ÖGK arm: category routing, idempotent submission, refund sync.
 
 Same constraints as test_task_status_transitions.py (sync tests, NullPool,
 no real Playwright). OegkBot is always patched.
 
-Refund-matching tests use a throwaway user per test: poll_oegk_refund counts a
-user's in-flight OEGK_SUBMITTED invoices, so a shared user would make them
-depend on leftover rows in the dev database.
+PDF matching itself is covered in test_oegk_ingest.py.
 """
 import asyncio
 import uuid
@@ -25,7 +23,15 @@ from tests.test_task_status_transitions import (  # also installs the NullPool e
     _run_task,
 )
 from workers import tasks as tasks_module
-from workers.tasks import _ensure_local_file, celery_app, poll_oegk_refund, run_ocr, submit_to_oegk
+from workers.tasks import _ensure_local_file, celery_app, run_ocr, submit_to_oegk, sync_oegk_refunds
+
+
+@pytest.fixture(autouse=True)
+def _submit_enabled():
+    """Submission is off by default; these tests exercise the enabled path."""
+    from core.config import get_settings
+    with patch.object(get_settings(), "oegk_submit_enabled", True):
+        yield
 
 
 _FIXTURE = Path("/tmp/kaiserclaim-test-storage/fixture.pdf")
@@ -165,55 +171,107 @@ def test_submit_to_oegk_no_success_signal_marks_failed():
 
 
 # ---------------------------------------------------------------------------
-# poll_oegk_refund
+# submission switch (off until the meine ÖGK submit flow is calibrated)
 # ---------------------------------------------------------------------------
 
-def _poll(invoice_id, refund_path):
-    with patch("workers.tasks.OegkBot.download_refund_pdf", new=AsyncMock(return_value=refund_path)):
-        return _run_task(poll_oegk_refund.run, invoice_id)
-
-
-def test_poll_refund_pending_leaves_status():
-    user = asyncio.run(_create_user())
-    invoice_id = _make(InvoiceStatus.OEGK_SUBMITTED, user_id=user)
-
-    result = _poll(invoice_id, None)
-
-    assert result["refund"] == "pending"
-    assert _get_status(invoice_id) == InvoiceStatus.OEGK_SUBMITTED
-
-
-def test_poll_refund_single_invoice_advances_to_merkur():
-    user = asyncio.run(_create_user())
-    invoice_id = _make(InvoiceStatus.OEGK_SUBMITTED, user_id=user)
-
-    result = _poll(invoice_id, "/tmp/kaiserclaim-test-storage/refund.pdf")
-
-    assert result["status"] == "READY_FOR_MERKUR"
-    assert _get_status(invoice_id) == InvoiceStatus.READY_FOR_MERKUR
-
-
-def test_poll_refund_ambiguous_needs_manual_match():
-    user = asyncio.run(_create_user())
-    first = _make(InvoiceStatus.OEGK_SUBMITTED, user_id=user)
-    second = _make(InvoiceStatus.OEGK_SUBMITTED, user_id=user)
-
-    result = _poll(first, "/tmp/kaiserclaim-test-storage/refund.pdf")
-
-    assert result["refund"] == "needs_manual_match"
-    assert _get_status(first) == InvoiceStatus.OEGK_SUBMITTED
-    assert _get_status(second) == InvoiceStatus.OEGK_SUBMITTED
-
-
-def test_poll_refund_ignores_invoice_not_awaiting_refund():
-    invoice_id = _make(InvoiceStatus.READY_FOR_MERKUR)
-    with patch(
-        "workers.tasks.OegkBot.download_refund_pdf",
-        new=AsyncMock(side_effect=AssertionError("bot must not be invoked")),
-    ):
-        result = _run_task(poll_oegk_refund.run, invoice_id)
+def test_submit_to_oegk_disabled_leaves_invoice_untouched():
+    invoice_id = _make(InvoiceStatus.READY_FOR_OEGK, category="Arzt")
+    with patch.object(tasks_module.settings, "oegk_submit_enabled", False), \
+         patch(
+             "workers.tasks.OegkBot.submit_invoice",
+             new=AsyncMock(side_effect=AssertionError("bot must not be invoked")),
+         ):
+        result = _run_task(submit_to_oegk.run, invoice_id)
 
     assert result["skipped"] is True
+    assert _get_status(invoice_id) == InvoiceStatus.READY_FOR_OEGK
+
+
+@pytest.mark.asyncio
+async def test_submit_oegk_endpoint_disabled_returns_501(client):
+    from core.config import get_settings
+    invoice_id = await _create(InvoiceStatus.READY_FOR_OEGK)
+    with patch.object(get_settings(), "oegk_submit_enabled", False), \
+         patch("api.endpoints.invoices.submit_to_oegk.delay") as delay:
+        r = await client.post(api_url(f"/invoices/{invoice_id}/submit-oegk"))
+
+    assert r.status_code == 501
+    delay.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# sync_oegk_refunds
+# ---------------------------------------------------------------------------
+
+def _sync(paths, outcomes):
+    with patch("workers.tasks.OegkBot.download_refunds", new=AsyncMock(return_value=paths)) as bot, \
+         patch("workers.tasks._ingest_refund_file", side_effect=outcomes) as ingest, \
+         patch("services.notifier.notify") as notify:
+        result = _run_task(sync_oegk_refunds.run, str(TEST_USER_ID))
+    return result, bot, ingest, notify
+
+
+def test_sync_counts_outcomes_and_notifies_only_for_new_unmatched():
+    result, bot, ingest, notify = _sync(
+        ["/tmp/a.pdf", "/tmp/b.pdf", "/tmp/c.pdf", "/tmp/d.pdf"],
+        [
+            {"outcome": "linked", "is_new": True},
+            {"outcome": "duplicate", "is_new": False},
+            {"outcome": "unmatched", "is_new": True},
+            {"outcome": "ambiguous", "is_new": False},  # seen before: no repeat notification
+        ],
+    )
+
+    assert result["downloaded"] == 4
+    assert result["linked"] == 1 and result["unmatched"] == 1 and result["duplicate"] == 1
+    assert ingest.call_count == 4
+    notify.assert_called_once()
+    assert "1 new" in notify.call_args.args[0]
+
+
+def test_sync_without_pdfs_does_nothing():
+    result, bot, ingest, notify = _sync([], [])
+
+    assert result["downloaded"] == 0
+    ingest.assert_not_called()
+    notify.assert_not_called()
+
+
+def test_sync_passes_since_to_bot():
+    with patch("workers.tasks.OegkBot.download_refunds", new=AsyncMock(return_value=[])) as bot:
+        _run_task(sync_oegk_refunds.run, str(TEST_USER_ID), "01.01.2025")
+
+    assert bot.await_args.args[1] == "01.01.2025"
+
+
+def test_sync_cleans_up_download_dir_on_error():
+    seen = {}
+
+    async def _boom(_self, output_dir, since=None):
+        seen["dir"] = Path(output_dir)
+        seen["dir"].mkdir(parents=True)
+        (seen["dir"] / "x.pdf").write_bytes(b"%PDF")
+        raise RuntimeError("2FA timeout")
+
+    with patch("workers.tasks.OegkBot.download_refunds", new=_boom):
+        with pytest.raises(RuntimeError):
+            _run_task(sync_oegk_refunds.run, str(TEST_USER_ID))
+
+    assert not seen["dir"].exists()
+
+
+def test_poll_fans_out_one_sync_per_waiting_user():
+    user = asyncio.run(_create_user())
+    _make(InvoiceStatus.OEGK_SUBMITTED, user_id=user)
+    _make(InvoiceStatus.READY_FOR_OEGK, user_id=user)  # same user: still one sync
+    with patch("workers.tasks.sync_oegk_refunds.apply_async") as apply_async:
+        result = _run_task(tasks_module.poll_oegk_refunds.run)
+
+    users = {c.kwargs["args"][0] for c in apply_async.call_args_list}
+    assert str(user) in users
+    assert len(users) == len(apply_async.call_args_list)  # no user queued twice
+    assert all(c.kwargs["expires"] <= 24 * 3600 for c in apply_async.call_args_list)
+    assert result["users"] == len(users)
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +319,7 @@ async def test_correction_routes_to_oegk_for_non_pharmacy(client):
 def test_browser_tasks_routed_to_oegk_queue():
     routes = celery_app.conf.task_routes
     assert routes["workers.tasks.submit_to_oegk"]["queue"] == "oegk"
-    assert routes["workers.tasks.poll_oegk_refund"]["queue"] == "oegk"
+    assert routes["workers.tasks.sync_oegk_refunds"]["queue"] == "oegk"
     # The fan-out task needs no browser and stays on the default (cluster) queue.
     assert "workers.tasks.poll_oegk_refunds" not in routes
 

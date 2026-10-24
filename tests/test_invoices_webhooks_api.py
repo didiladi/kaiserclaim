@@ -39,16 +39,32 @@ async def test_webhook_rejects_wrong_secret(client):
 
 @pytest.mark.asyncio
 async def test_webhook_accepts_correct_secret(client):
+    invoice_id = await _insert_invoice(InvoiceStatus.READY_FOR_OEGK)
     with patch.object(get_settings(), "webhook_secret", "correct-secret"):
-        with patch("workers.tasks.poll_oegk_refund.delay") as mock_delay:
+        with patch("workers.tasks.sync_oegk_refunds.delay") as mock_delay:
             r = await client.post(
                 api_url("/webhooks/oegk-refund-ready"),
-                json={"invoice_id": "11111111-1111-1111-1111-111111111111"},
+                json={"invoice_id": invoice_id},
                 headers={"X-Webhook-Secret": "correct-secret"},
             )
     assert r.status_code == 200
     assert r.json()["status"] == "accepted"
-    mock_delay.assert_called_once_with("11111111-1111-1111-1111-111111111111")
+    mock_delay.assert_called_once_with(str(TEST_USER_ID))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_id", ["11111111-1111-1111-1111-111111111111", "not-a-uuid"])
+async def test_webhook_ignores_unknown_invoice(client, bad_id):
+    with patch.object(get_settings(), "webhook_secret", "correct-secret"):
+        with patch("workers.tasks.sync_oegk_refunds.delay") as mock_delay:
+            r = await client.post(
+                api_url("/webhooks/oegk-refund-ready"),
+                json={"invoice_id": bad_id},
+                headers={"X-Webhook-Secret": "correct-secret"},
+            )
+    assert r.status_code == 200
+    assert r.json()["status"] == "ignored"
+    mock_delay.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

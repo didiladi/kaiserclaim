@@ -22,4 +22,4 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Run parser unit tests
-        run: pytest tests/test_regex_parser.py tests/test_rksv_parser.py -v
+        run: pytest tests/test_regex_parser.py tests/test_rksv_parser.py tests/test_oegk_result_parser.py -v

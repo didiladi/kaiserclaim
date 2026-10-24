@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.dependencies import get_current_user
 from core.database import get_db
 from models.domain import FamilyMember, User
-from schemas.payload import FamilyMemberCreate, FamilyMemberRead
+from schemas.payload import FamilyMemberCreate, FamilyMemberRead, FamilyMemberUpdate
 
 router = APIRouter(prefix="/family", tags=["family"])
 
@@ -33,6 +33,24 @@ async def create_family_member(
 ):
     member = FamilyMember(user_id=current_user.id, **payload.model_dump())
     db.add(member)
+    await db.commit()
+    await db.refresh(member)
+    return member
+
+
+@router.patch("/{member_id}", response_model=FamilyMemberRead)
+async def update_family_member(
+    member_id: UUID,
+    payload: FamilyMemberUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    member = await db.get(FamilyMember, member_id)
+    if not member:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Family member not found")
+    if member.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    member.svnr = payload.svnr
     await db.commit()
     await db.refresh(member)
     return member

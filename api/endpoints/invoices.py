@@ -226,6 +226,13 @@ async def trigger_oegk_submission(
 ):
     """Queue ÖGK submission. The bot needs an interactive ID-Austria 2FA login
     when the persistent session has expired, so the worker must have a display."""
+    if not get_settings().oegk_submit_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="ÖGK submission is disabled: the meine ÖGK submit flow is not calibrated yet. "
+                   "Submit manually in meine ÖGK; refund PDFs are still matched automatically.",
+        )
+
     invoice = await db.get(Invoice, invoice_id)
     _assert_owned(invoice, current_user.id)
 

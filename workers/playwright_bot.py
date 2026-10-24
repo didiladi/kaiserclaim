@@ -9,9 +9,11 @@ Playwright automation bots.
 """
 import asyncio
 import logging
+import uuid
 from pathlib import Path
+from typing import Sequence
 
-from playwright.async_api import async_playwright, BrowserContext, Page
+from playwright.async_api import async_playwright, BrowserContext, Page, TimeoutError as PlaywrightTimeoutError
 
 from core.config import get_settings
 
@@ -23,7 +25,11 @@ _OEGK_USER_DATA_DIR = Path(settings.storage_root) / ".oegk_browser_session"
 _MERKUR_PORTAL_URL = "https://portal.merkur.at/"
 _MERKUR_FORM_URL = "https://portal.merkur.at/de/leistungseinreichung"
 _MERKUR_INBOX_URL = "https://portal.merkur.at/portal/inbox.html#/inbox"
+# Old Kundenportal URL, only used by the uncalibrated OegkBot.submit_invoice (disabled).
 _OEGK_PORTAL_URL = "https://www.oegk.at/kundenportal"
+# meine ÖGK, calibrated 2026-10-24 (lookup only; see CLAUDE.md "meine ÖGK calibration status").
+_OEGK_START_URL = "https://meine.oegk.at/cdscontent/?contentid=10007.883235&portal=oegkportal"
+_OEGK_LIST_URL = "https://meine.oegk.at/vsInfo/views/KE/?contentid=10007.880774&portal=meinesvoegkstportal&LO=1"
 
 # ---------------------------------------------------------------------------
 # Inbox DOM selectors — confirmed by calibrate_merkur_inbox.py (2026-05-22)
@@ -53,7 +59,7 @@ _ABRECHNUNG_DOWNLOAD_BTN = "button:has-text('ABRECHNUNG HERUNTERLADEN')"
 class MerkurBot:
     async def submit_pharmacy_receipt(
         self,
-        invoice_pdf: str,
+        invoice_pdf: str | Sequence[str],
         amount: float,
         date: str,
         patient_name: str = "",
@@ -289,8 +295,18 @@ class MerkurBot:
 
         # ── Step 3: Dateiauswahl ────────────────────────────────────────────────
         # The file input is hidden (0x0); set_input_files works on hidden inputs.
-        await form_page.locator("input[type=file]").set_input_files(invoice_pdf)
-        await form_page.wait_for_timeout(1_000)
+        # The input is `multiple`: the photo and the ÖGK refund PDF go in one Vorgang.
+        files = [invoice_pdf] if isinstance(invoice_pdf, str) else list(invoice_pdf)
+        await form_page.locator("input[type=file]").set_input_files(files)
+        try:
+            # one .filename entry per attached file, rendered in .selected-files-list
+            await form_page.wait_for_function(
+                "n => document.querySelectorAll('.selected-files-list .filename').length >= n",
+                arg=len(files),
+                timeout=30_000,
+            )
+        except PlaywrightTimeoutError:
+            raise RuntimeError(f"Merkur upload list did not show all {len(files)} files")
         await self._weiter(form_page)
 
         # ── Step 4: Zusammenfassung ─────────────────────────────────────────────
@@ -588,6 +604,8 @@ class MerkurBot:
 
 class OegkBot:
     async def submit_invoice(self, invoice_pdf: str, amount: float, date: str) -> bool:
+        # WARNING: selectors target the OLD Kundenportal and are guesses. Never enabled
+        # (settings.oegk_submit_enabled is off) until the meine ÖGK submit flow is calibrated.
         _OEGK_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
         async with async_playwright() as pw:
             context: BrowserContext = await pw.chromium.launch_persistent_context(
@@ -626,34 +644,81 @@ class OegkBot:
 
         return "eingereicht" in (await page.text_content("body") or "").lower()
 
-    async def download_refund_pdf(self, output_dir: str) -> str | None:
-        """Poll the ÖGK portal for a new refund PDF and download it."""
+    async def download_refunds(self, output_dir: str, since: str | None = None) -> list[str]:
+        """Download every refund confirmation PDF listed under 'Eingereichte Rechnungen'.
+
+        since: optional DD.MM.YYYY for the list's Von-Datum (portal default: last 12 months).
+        Files get unique names; the caller parses them and sends them on. Returns the paths.
+        """
         _OEGK_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
         async with async_playwright() as pw:
             context = await pw.chromium.launch_persistent_context(
                 str(_OEGK_USER_DATA_DIR),
-                headless=settings.oegk_headless,
+                headless=settings.oegk_headless,  # headed by default: user completes ID Austria 2FA
                 accept_downloads=True,
             )
             page = context.pages[0] if context.pages else await context.new_page()
             try:
-                return await self._download_refund(page, output_dir)
+                return await self._download_refunds(context, page, output_dir, since)
             finally:
                 await context.close()
 
-    async def _download_refund(self, page: Page, output_dir: str) -> str | None:
-        await page.goto(_OEGK_PORTAL_URL, wait_until="networkidle")
-        await page.click("text=Meine Abrechnungen")
+    async def _open_claim_list(self, page: Page, since: str | None) -> None:
+        # Selectors calibrated 2026-10-24. JSF ids carry auto-generated j_idt parts, so
+        # match on the stable id suffix, never the full id.
+        wah_tab = page.locator('a[id$=":wah_tab"]')
+        await page.goto(_OEGK_LIST_URL, wait_until="networkidle")
+        try:
+            await wah_tab.wait_for(timeout=10_000)
+        except PlaywrightTimeoutError:
+            # Not logged in: the user does ID Austria (incl. 2FA) in the headed window.
+            logger.warning("OegkBot: login required, please authenticate in the browser window")
+            await page.goto(_OEGK_START_URL, wait_until="networkidle")
+            await page.wait_for_url("**/gpmsv/**", timeout=180_000)
+            await page.goto(_OEGK_LIST_URL, wait_until="networkidle")
+            await wah_tab.wait_for(timeout=15_000)
 
-        # Look for an undownloaded refund document
-        refund_links = await page.query_selector_all("a[href*='refund'], a[href*='abrechnung']")
-        if not refund_links:
-            return None
+        await wah_tab.click()
+        await page.get_by_role("button", name="Weiter").click()
+        await page.wait_for_load_state("networkidle")
+        if since:
+            await page.fill("#vonDat", since)
+            await page.locator('input[type=submit][value="OK"]').click()
+            await page.wait_for_load_state("networkidle")
 
-        async with page.expect_download() as dl_info:
-            await refund_links[0].click()
-        download = await dl_info.value
+    async def _download_refunds(
+        self, context: BrowserContext, page: Page, output_dir: str, since: str | None
+    ) -> list[str]:
+        await self._open_claim_list(page, since)
 
-        dest = Path(output_dir) / download.suggested_filename
-        await download.save_as(str(dest))
-        return str(dest)
+        rows = page.locator("#cb_list_done [role=row]")
+        saved: list[str] = []
+        for i in range(await rows.count()):
+            dest = Path(output_dir) / f"{uuid.uuid4().hex}.pdf"
+            await self._click_and_save(context, page, rows.nth(i).locator(".cb_download a"), dest)
+            saved.append(str(dest))
+        return saved
+
+    async def _click_and_save(self, context: BrowserContext, page: Page, link, dest: Path) -> None:
+        """Click a PDF link (it submits a form to a new tab) and save the resulting download."""
+        got: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def on_download(download) -> None:
+            if not got.done():
+                got.set_result(download)
+
+        def on_page(new_page: Page) -> None:
+            new_page.on("download", on_download)
+
+        page.on("download", on_download)
+        context.on("page", on_page)
+        try:
+            await link.click()
+            download = await asyncio.wait_for(got, timeout=60)
+            await download.save_as(str(dest))
+        finally:
+            page.remove_listener("download", on_download)
+            context.remove_listener("page", on_page)
+            for extra in context.pages[1:]:  # the download tab is left behind blank
+                await extra.close()

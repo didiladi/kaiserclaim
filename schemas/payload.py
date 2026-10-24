@@ -35,11 +35,20 @@ class UserRead(_Base):
 # FamilyMember
 # ---------------------------------------------------------------------------
 
+_SVNR = r"^\d{10}$"
+
+
 class FamilyMemberCreate(BaseModel):
     member_key: str
     name: str
     color: str
     initials: str
+    svnr: Optional[str] = Field(default=None, pattern=_SVNR)
+
+
+class FamilyMemberUpdate(BaseModel):
+    """svnr is write-only PII: Read only reports whether one is stored."""
+    svnr: Optional[str] = Field(default=None, pattern=_SVNR)
 
 
 class FamilyMemberRead(_Base):
@@ -49,7 +58,19 @@ class FamilyMemberRead(_Base):
     name: str
     color: str
     initials: str
+    has_svnr: bool = False
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# ÖGK refund PDFs
+# ---------------------------------------------------------------------------
+
+class OegkIngestRead(BaseModel):
+    outcome: Literal["not_a_refund", "duplicate", "linked", "unmatched", "ambiguous"]
+    document_id: Optional[uuid.UUID] = None
+    invoice_id: Optional[uuid.UUID] = None
+    is_new: bool = False
 
 
 # ---------------------------------------------------------------------------
